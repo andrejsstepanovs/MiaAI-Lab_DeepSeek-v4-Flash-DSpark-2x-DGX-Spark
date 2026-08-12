@@ -1,4 +1,4 @@
-.env.dspark
+#.env.dspark
 .env.dspark.works
 .env
 .secrets/

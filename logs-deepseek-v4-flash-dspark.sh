@@ -22,15 +22,19 @@ WORKER_DIR="${WORKER_SCRIPT_DIR:-${WORKER_DIR:-$SCRIPT_DIR}}"
 
 show_logs() {
   local project="$1"
-  echo "== head logs: $project =="
-  COMPOSE_DISABLE_ENV_FILE=1 docker compose -p "$project" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" logs --tail="$TAIL" vllm-dspark || true
-  echo
-  echo "== worker logs: $project =="
-  ssh "$WORKER_HOST" "cd '$WORKER_DIR' && COMPOSE_DISABLE_ENV_FILE=1 docker compose -p '$project' --env-file .env.dspark -f docker-compose.dspark.yml logs --tail='$TAIL' vllm-dspark" || true
+  shift
+  echo "== Streaming logs: $project (head + worker) =="
+  COMPOSE_DISABLE_ENV_FILE=1 docker compose -p "$project" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" logs --tail="$TAIL" "$@" vllm-dspark &
+  local pid_head=$!
+
+  ssh "$WORKER_HOST" "cd '$WORKER_DIR' && COMPOSE_DISABLE_ENV_FILE=1 docker compose -p '$project' --env-file .env.dspark -f docker-compose.dspark.yml logs --tail='$TAIL' $* vllm-dspark" &
+  local pid_worker=$!
+
+  wait "$pid_head" "$pid_worker" 2>/dev/null || true
   echo
 }
 
-show_logs "$PROJECT_NAME"
+show_logs "$PROJECT_NAME" "$@"
 if [ "$LEGACY_PROJECT_NAME" != "$PROJECT_NAME" ]; then
-  show_logs "$LEGACY_PROJECT_NAME"
+  show_logs "$LEGACY_PROJECT_NAME" "$@"
 fi
