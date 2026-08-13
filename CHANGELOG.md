@@ -1,4 +1,56 @@
+## 2026-08-13
+
+### Changed
+
+- **GitHub Actions `validate` workflow**: on every push/PR, `scripts/ci-validate.sh` runs CPU-only recipe gates (shell syntax, patch compile, #21/#26 v2 unit tests, #49486/#48407 equality gate, overlay COPY check) and refuses to re-ship the withdrawn #31/#34 thinking-budget hook or a #26 v1 coordinator. This does **not** replace a live 2× Spark decode or tool-eval run.
+
+- **Reverted the #31/#34 `thinking_token_budget` patch (bug + hotfix)**: the V2 sampler hook, `ThinkingBudgetState` O(n) per-step scan, and omit-field defaults (`DEFAULT_THINKING_TOKEN_BUDGET=32768`, `DEFAULT_MAX_TOKENS=131072`) are **fully removed** from compose, start, and `patches/`. That path was the [#39](https://github.com/MiaAI-Lab/DeepSeek-v4-Flash-DSpark-2x-DGX-Spark/issues/39) **~4.7× decode tok/s cliff** at long context (Python scan × MTP rows on every request after #34). It is not incremental-scanned and left in; it is gone. Stock Anemll V2 again rejects `thinking_token_budget` (HTTP 400). Size client `max_tokens` (or set `DEFAULT_THINKING` below `max`) so a long think cannot empty `content`.
+
+- **Current tip should not produce those two regressions**: together with **#26 v2** (SWA may shrink the common prefix hit again; see #36 below), this recipe no longer ships a mechanism that should **drop decode tok/s** the way #31/#34 did, or **garble** the way #26 v1 did (warm 21k DSML/CJK salad, invented tool names, stale cross-turn KV). #27 stays. `VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096` stays. Remaining `high`/`max`+tools model/template noise is not a leftover budget or v1-cache patch.
+
+### Fixed
+
+- **Client `stop` strings no longer fire inside `<think>`**: vLLM v1 matches harness stops (`Question:`, lm-eval `stop[:4]`, …) against the whole stream, so think-in-prompt requests die mid-reason with `content: null`. Port of [tonyd2wild Patch 5 / Capicua25x](https://github.com/tonyd2wild/DeepSeek-v4-Flash-0731-DSpark-1M-NVFP4-KV-2x-DGX-Spark/blob/main/patches/0005-suppress-stops-in-reasoning.patch) onto the **Anemll** detokenizer (`/usr/local/lib/python3.12/dist-packages/vllm/v1/engine/detokenizer.py`), not the Stage-C `/opt/env/...` bind-mount. Guard only if the last prompt token is the reasoning start marker; speculative chunks that contain `</think>` only evaluate stops *after* the marker. Default on; `DSPARK_SUPPRESS_STOPS_IN_REASONING=0` (or `VLLM_SUPPRESS_STOPS_IN_REASONING=0`) disables the guard; `DSPARK_SKIP_SUPPRESS_STOPS_HOTFIX=1` skips the file. Unit: `scripts/test-suppress-stops-in-reasoning.py`. This is **not** the withdrawn `#31` thinking-budget hook.
+
+  Live on 2× Spark TP=2 (official 0731, this hotfix applied in the running container): think + `stop: ["Question:"]` returned `content` (`17 + 25 = 42`, 99 completion tokens) instead of null; thinking-off still cut at `Question:`; `PING-OK-17` and `low`+tools `grep(/tmp, Clash)` unchanged. Restart both ranks.
+
+- **Worker Exited (1) on every start ([Issue #38](https://github.com/MiaAI-Lab/DeepSeek-v4-Flash-DSpark-2x-DGX-Spark/issues/38))**: the start script applied `.sh` hotfixes then `compose restart`/`stop` while vLLM was loading, which tore down head's TCPStore under rank1 (or hung the operator on `Stopping`). Those scripts now run in the compose entrypoint **before** `exec vllm`, so start no longer stops a fresh boot. Compose has `restart: unless-stopped` and `stop_grace_period: 10s`; `./stop-…` `docker rm -f`s first.
+
+- **Warm shared-prefix DSML / CJK salad after #26 ([Issue #36](https://github.com/MiaAI-Lab/DeepSeek-v4-Flash-DSpark-2x-DGX-Spark/issues/36))**: the v1 hybrid-SWA hotfix refused to let sliding-window groups shrink `curr_hit_length`. A 21k Hermes system prefix then reported a 100% MLA cache hit while SWA had no retained tail at that length (different user turns move the replay boundary; `VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096` only keeps sparse checkpoints). Prefill was skipped and SWA KV was padded with nulls → leftover `</｜DSML｜parameter>` / Chinese / loops. v2 restores the min-across-groups length so the common hit stops at the last SWA tail. Warm hits stay large because of retention, not because we ignore a missing SWA window. Unit: `scripts/test-issue26-swa-min-v2.py`. Restart required.
+
+- **#31/#34 thinking-budget hook scanned the full prefix every decode step** *(withdrawn later the same day)*: after #34 every omitted-field request had a budget, so the V2 sampler hook no longer early-returned. Incremental scan was a stopgap; the whole hook is now removed (see Changed above).
+
+- **Blank turns on stock OpenAI clients ([Issue #34](https://github.com/MiaAI-Lab/DeepSeek-v4-Flash-DSpark-2x-DGX-Spark/issues/34))** *(withdrawn later the same day)*: omit-field defaults `DEFAULT_THINKING_TOKEN_BUDGET=32768` / `DEFAULT_MAX_TOKENS=131072` were added, then removed with the hook.
+
+### Docs
+
+- README: `thinking_token_budget` is not supported on this V2 serve; size `max_tokens` instead (see Changed above).
+
+### Fixed
+
+- **`thinking_token_budget` rejected on DSpark / V2 ([Issue #31](https://github.com/MiaAI-Lab/DeepSeek-v4-Flash-DSpark-2x-DGX-Spark/issues/31))** *(hotfix later withdrawn; see Changed above)*: stock Anemll `0.1.1` rejects the field on the V2 runner (HTTP 400). DSpark cannot use `VLLM_USE_V2_MODEL_RUNNER=0`. Clients must size `max_tokens` so a `DEFAULT_THINKING=max` think cannot empty `content`.
+
+- **Prefix-cache collapse at 32K+ x8 ([Issue #26](https://github.com/MiaAI-Lab/DeepSeek-v4-Flash-DSpark-2x-DGX-Spark/issues/26))** (`1f9765e`): DSV4-Flash + DSpark on Anemll `0.1.1` runs four KV groups (1× `MLAAttentionSpec` + 3× `SlidingWindowMLASpec`). `HybridKVCacheCoordinator.find_longest_cache_hit` takes the min hit length across groups, so a sliding-window group that frees old blocks by design zeroes the common hit. Warm x8 32K/62K then fully re-prefills (`prefix_cache_hits_total +0`, warm wall == cold). Independent of #27.
+
+  Coordinator-only is necessary but not sufficient: at 44K+ x8, dense SWA tails also evict MLA prefix blocks from the shared pool.
+
+  **Fix (both required):**
+  1. `patches/hotfix-dsv4-issue26-hybrid-swa-min.py` — originally skipped SWA shrink of `curr_hit_length` (v1). **Superseded by v2** (issue #36): SWA may shrink again; retention (below) is what keeps warm hits.
+  2. `VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096` — sparsify SWA prefix-cache checkpoints (one tail per 4096-token segment + replay boundary).
+
+  Live (TP=2, `max_num_seqs=8`, #27 live): x8 ~22.8K / ~44.7K / ~88.4K warm **8/8** (ratios 0.9986 / 0.9973 / 0.9996; 32K warm wall ~9 s vs ~421 s); x1 262K control 5/5. Repro: `scripts/reproduce-issue26-live.py`, `scripts/reproduce-issue26-control.py`.
+
 ## 2026-08-12
+
+### Fixed
+
+- **Decode-lane starvation under concurrent long prefill ([Issue #27](https://github.com/MiaAI-Lab/DeepSeek-v4-Flash-DSpark-2x-DGX-Spark/issues/27))** (`2f180e7`): stock vLLM 0.25.2.dev0 defines `SchedulerConfig.max_num_partial_prefills` (default 1) but the v1 `Scheduler.schedule` admission loop never reads it. With chunked prefill + async scheduling + `max_num_seqs>=8` and `long_prefill_token_threshold=0`, multiple already-admitted prefills at the front of `self.running` each consume `max_num_batched_tokens`; decode-active requests later get `num_new_tokens==0` and are skipped (`continue`, not preempted) — cold-only, zero-preemption starvation that grows with prompt length.
+
+  **Fix (both required):**
+  1. `patches/hotfix-dsv4-issue27-partial-prefill-concurrency.py` — break waiting-admission once `len(self._inflight_prefills)` reaches `max_num_partial_prefills`.
+  2. `LONG_PREFILL_TOKEN_THRESHOLD=1024` — cap each prefill chunk so decode lanes keep leftover budget.
+
+  Live: x8 8K/16K/32K worst decode ~15 tok/s (was 2.07 / 0.47 / 0.36), +0 preemptions, MTP 96–99%. Repro: `scripts/reproduce-issue27-live.py`.
 
 ### New
 

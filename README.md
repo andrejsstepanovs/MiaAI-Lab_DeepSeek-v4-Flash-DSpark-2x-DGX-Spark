@@ -30,6 +30,18 @@ Pull on **both** nodes before first start:
 docker pull ghcr.io/anemll/dspark-vllm-gx10:0.1.1
 ```
 
+### Push validation (GitHub Actions)
+
+Every push and pull request to `main` runs [`.github/workflows/validate.yml`](.github/workflows/validate.yml) → `scripts/ci-validate.sh` on a stock Ubuntu runner. That is **CPU-only**: it will not start vLLM, measure tok/s, or catch a live garble. It *will* fail the push if a patch file is broken, if the withdrawn `#31`/`#34` thinking-budget hook is wired back into compose/start, or if `#26` is no longer v2.
+
+Run the same gates locally before you start a serve:
+
+```bash
+bash scripts/ci-validate.sh
+```
+
+Live regressions (decode tok/s, tool-eval, 256k prefill) still need the 2× Spark pair after a restart.
+
 `docker-compose.dspark.yml` is aligned with that image layout:
 
 - entrypoint cleared; command uses `/usr/local/bin/vllm serve`
@@ -73,6 +85,7 @@ logic ships inside the image rather than as a host bind-mount.
 - **Available KV (text-only, this cluster @ util 0.835):** ~**18.08 GiB** → **GPU KV cache size ~2,493,464 tokens** (~2.38× concurrency at 1M; trust the live boot log)
 - `MTP_NUM_TOKENS=5` (checkpoint `dspark_block_size` is 5; k must be ≥ 5)
 - `DEFAULT_THINKING=max` (`off`, `low`, `high`, or `max`; request-level overrides still win)
+- `thinking_token_budget` is **not** supported on this DSpark/V2 image (HTTP 400). Size client `max_tokens` so a long `max` think cannot fill the whole generation (otherwise `content` is null and `finish_reason` is `length`). See [Client `max_tokens`](#client-max_tokens).
 - `VLLM_USE_BREAKABLE_CUDAGRAPH=0` (keep regular CUDA graphs; Anemll auto-enables the slower breakable path when unset)
 - API bind address `0.0.0.0:8888`
 
@@ -871,6 +884,31 @@ The recipe defaults to `DEFAULT_THINKING=max` (full effort). Set `low` (or
 `off` / `high`) in `.env.dspark` if you want a quieter base mode. Clients should
 still send an explicit request-level override when they require deterministic
 behavior.
+
+> [!IMPORTANT]
+> This DSpark/V2 image **rejects** `thinking_token_budget` (HTTP 400). The
+> #31/#34 sampler hook was withdrawn: it slowed long-context decode and
+> interacted badly with tool loops. Size `max_tokens` yourself. With
+> `DEFAULT_THINKING=max`, a small cap (256, 512, 800) can be consumed
+> entirely inside `<think>` and return `content: null` /
+> `finish_reason: length`. Give the answer room, or set thinking `low`/`off`.
+>
+> Client `stop` / `stop[:4]` (lm-eval, many coding agents) is a **second**
+> way to get `content: null`: vLLM matches those strings inside `<think>`.
+> The recipe applies `patches/hotfix-dsv4-suppress-stops-in-reasoning.py`
+> so stops stay dormant until `</think>`. Opt out with
+> `DSPARK_SUPPRESS_STOPS_IN_REASONING=0`.
+
+### Client `max_tokens`
+
+`max_tokens` caps **all** new tokens (reasoning + visible answer + tool
+markup). 0731 at `DEFAULT_THINKING=max` thinks a lot. There is no server-side
+reasoning budget on this recipe.
+
+Do **not** send a tiny harness `max_tokens` (256, 512, 800) while leaving
+think at `max` unless you accept blank turns. Inspect `finish_reason` and
+`completion_tokens`: `length` + null `content` means think used the whole
+cap — raise `max_tokens` or lower thinking.
 
 A ready-to-copy pi configuration is provided in
 [`pi-models.dspark.example.json`](pi-models.dspark.example.json):
