@@ -1,0 +1,20 @@
+[Unit]
+Description=DeepSeek V4 Flash DSpark cluster autostart
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=andrejs
+Environment=HOME=/home/andrejs
+WorkingDirectory=/home/andrejs/ds4-recipe
+ExecStart=/home/andrejs/ds4-recipe/dspark-autostart.sh
+TimeoutStartSec=infinity
+Restart=on-failure
+RestartSec=60
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
