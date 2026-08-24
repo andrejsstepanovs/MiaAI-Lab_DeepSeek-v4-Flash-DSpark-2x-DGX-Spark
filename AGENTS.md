@@ -58,6 +58,23 @@ develop/benchmark it, never as part of a routine upstream upgrade.
    image is still the Anemll digest pin on **both** nodes
    (`docker ps` + check worker via ssh).
 
+## Checking whether the pinned Anemll image is still current
+
+The digest pin is immutable — you stay on the tested build until you bump it.
+To see if Anemll has published anything newer:
+
+- List tags: `ghcr.io/anemll/dspark-vllm-gx10` currently has only `0.1.0` and
+  `0.1.1` (`0.1.1` is latest). Get the manifest digest of a tag:
+  ```
+  TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:anemll/dspark-vllm-gx10:pull" | jq -r .token)
+  curl -sI -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+    "https://ghcr.io/v2/anemll/dspark-vllm-gx10/manifests/0.1.1" | grep -i docker-content-digest
+  ```
+- If the digest equals the `.env.dspark` pin (`sha256:a83948...`), you're on the
+  current build — no pull needed. If a new tag or a re-pointed `0.1.1` digest
+  appears, you *may* bump the pin — but the hotfix suite is only guaranteed
+  against the tested digest; validate on a bench before adopting.
+
 ## What NOT to do
 
 - **Do not** change `DSPARK_VLLM_IMAGE` to activate a single upstream fix
