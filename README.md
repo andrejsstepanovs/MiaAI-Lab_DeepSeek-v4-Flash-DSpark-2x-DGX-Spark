@@ -1,14 +1,18 @@
-# DeepSeek V4 Flash 0731 DSpark on 2x DGX Spark
+# DeepSeek V4 Flash Vision-Exp DSpark on 2x DGX Spark
 
 <p align="center">
   <sub>by <a href="https://x.com/MiaAI_lab">Mia'a AI Lab</a></sub>
   <br><br>
-  <a href="https://ko-fi.com/Z8Z3SPLOD" target="_blank" rel="noopener noreferrer" style="display:inline-block;margin:0 8px;vertical-align:middle;"><img src="https://storage.ko-fi.com/cdn/kofi6.png?v=6" alt="Buy Me a Coffee at ko-fi.com" height="28" style="height:28px;width:auto;vertical-align:middle;border:0;" /></a>
+  <a href="https://github.com/sponsors/MiaAI-Lab" target="_blank" rel="noopener noreferrer" style="display:inline-block;margin:0 8px;vertical-align:middle;"><img src="https://img.shields.io/badge/Sponsor%20me%20on%20GitHub-181717?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="Sponsor me on GitHub" height="28" style="height:28px;width:auto;vertical-align:middle;border:0;" /></a>
   <a href="https://x.com/MiaAI_lab" target="_blank" rel="noopener noreferrer" style="display:inline-block;margin:0 8px;vertical-align:middle;"><img src="https://img.shields.io/badge/Follow%20me%20on%20X-000000?style=for-the-badge&logo=x&logoColor=white" alt="Follow Mia on X" height="28" style="height:28px;width:auto;vertical-align:middle;border:0;" /></a>
 </p>
 
-Two-node DGX Spark recipe for **`deepseek-ai/DeepSeek-V4-Flash-0731`**: vLLM TP=2,
-DSpark speculative decoding, **1M-token** ceiling, `nvfp4_ds_mla` KV.
+Two-node DGX Spark recipe for **`deepseek-ai/DeepSeek-V4-Flash-Vision-Exp`**: vLLM TP=2,
+DSpark speculative decoding, **1M-token** ceiling, `nvfp4_ds_mla` KV. Native
+**image** support is a startup hotfix on the Anemll 0.1.1 runtime (ViT + Aligner
+from the Vision-Exp checkpoint, OpenAI `image_url` / `<image>path</image>`).
+There is **no video encoder** in the official weights; GIF is a still frame.
+The old Qwen3-VL sidecar / MCP path is removed.
 
 **Default image:** [`ghcr.io/anemll/dspark-vllm-gx10:0.1.1`](https://github.com/Anemll/dspark-vllm-gx10)
 
@@ -48,7 +52,7 @@ working, and the same image + HF cache on both.
    ```
 
    Leave serving knobs at the defaults unless you mean to change them.
-   Meaningful on/off flags (thinking, vision, hotfixes) are
+   Meaningful on/off flags (`ABLITERATED`, thinking, hotfixes) are
    listed under [.env.dspark switches](#envdspark-switches).
 
 2. **Image on both nodes**
@@ -66,7 +70,8 @@ working, and the same image + HF cache on both.
    ./prepare-dspark-model-cache.sh --official
    ```
 
-   Use `--yes` (reads model vars from `.env.dspark`). Prepare forces HF
+   Use `--abliterated` or `--yes` (reads `ABLITERATED` from `.env.dspark`).
+   Abliterated weights are gated (`HF_TOKEN`). Prepare forces HF
    online even if `HF_HUB_OFFLINE=1`, then you can serve offline. After the cache is complete, keep `HF_HUB_OFFLINE=1` so a hub
    retry cannot fill the worker disk.
 
@@ -94,13 +99,13 @@ working, and the same image + HF cache on both.
    ./status-deepseek-v4-flash-dspark.sh
    ```
 
-   Expect `"id": "deepseek-v4-flash-0731"` and `"max_model_len": 1048576`.
+   Expect `"id": "deepseek-v4-flash-vision-exp"` and `"max_model_len": 1048576`.
    Boot log (trust the live numbers):
 
    ```text
-   Available KV cache memory: 18.08 GiB
-   GPU KV cache size: 2,493,464 tokens
-   Maximum concurrency for 1,048,576 tokens per request: 2.38x
+   Available KV cache memory: 17.04 GiB
+   GPU KV cache size: 2,331,430 tokens
+   Maximum concurrency for 1,048,576 tokens per request: 2.22x
    ```
 
 API: `http://HEAD_NODE_IP:8888/v1` (`VLLM_HOST=0.0.0.0` by default).
@@ -116,18 +121,18 @@ hosts or it can kill vLLM under deep-context load.
 | Knob | Default |
 | --- | --- |
 | Image | `ghcr.io/anemll/dspark-vllm-gx10:0.1.1` |
-| Checkpoint | official 0731 @ `9e165c30e2704aec5d9d593cce3eebd58bbef1cb` |
-| Served name | `deepseek-v4-flash-0731` |
+| Checkpoint | official Vision-Exp @ `86f746b36186f0e567729a5c06a8c918caba82a9` (`ABLITERATED=0`) |
+| Served name | `deepseek-v4-flash-vision-exp` |
 | Context ceiling | `MAX_MODEL_LEN=1048576` (1M) |
 | Concurrent seqs | `MAX_NUM_SEQS=6` |
 | Batch tokens | `MAX_NUM_BATCHED_TOKENS=8192` |
-| KV | `nvfp4_ds_mla`, text util **0.835** (~2.49M tokens on this cluster) |
-| Spec | `MTP_NUM_TOKENS=5` (must be ≥ checkpoint `dspark_block_size`) |
+| KV | `nvfp4_ds_mla`, **17.04 GiB / 2,331,430 tokens** on this cluster (util 0.83; Vision-Exp ViT takes more weight RAM than 0731) |
+| Spec | `MTP_NUM_TOKENS=6` (≥ `dspark_block_size` 5 and divisible by Vision-Exp `n_predict=3`) |
 | Thinking | `DEFAULT_THINKING=max` (`off` / `low` / `high` / `max`) |
 | Graphs | `VLLM_USE_BREAKABLE_CUDAGRAPH=0` (keep this; unset is slower) |
 
 `start-*.sh` exports `GPU_MEMORY_UTILIZATION` from
-`GPU_MEMORY_UTILIZATION_TEXT` (or `_VISION`). Do not set
+`GPU_MEMORY_UTILIZATION_TEXT`. Do not set
 `GPU_MEMORY_UTILIZATION` by hand.
 
 `max_model_len` and `max_num_seqs` are **ceilings**, not reservations. The
@@ -158,9 +163,45 @@ cluster wiring, not product switches. Full Anemll vs Stage-C matrix:
 
 | Variable | Default | What it does |
 | --- | --- | --- |
-| `DSPARK_REVISION` | `9e165c30e2704aec5d9d593cce3eebd58bbef1cb` | Official pin. Empty = tip of `main`. |
-| `SERVED_MODEL_NAME` | `deepseek-v4-flash-0731` | Name clients send as `model`. |
+| **`ABLITERATED`** | `0` | **`0`** = official [`deepseek-ai/DeepSeek-V4-Flash-Vision-Exp`](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-Vision-Exp) @ `DSPARK_REVISION`. **`1`** = [Keys abliterated](https://huggingface.co/drowzeys/keys-DeepSeekV4Flash-Vision-EXP-ablit). Start and prepare pick the HF id from this flag. Gated; `prepare --abliterated` needs `HF_TOKEN`. |
+| `DSPARK_REVISION` | `86f746b36186f0e567729a5c06a8c918caba82a9` | Official Vision-Exp pin. Empty = tip of `main`. |
+| `DSPARK_REVISION_ABLITERATED` | empty | Abliterated pin. Empty = tip of that repo. |
+| `DSPARK_MODEL_OFFICIAL` / `DSPARK_MODEL_ABLITERATED` | the two HF ids above | Override only if you intentionally swap the repo id. Do not point this at the 0731 ablit dump — that drops `image_url`. |
+| `SERVED_MODEL_NAME` | `deepseek-v4-flash-vision-exp` | Name clients send as `model`. |
 | `HF_HUB_OFFLINE` | `1` | `1` after both caches are warm (avoids filling the worker disk). Prepare forces online for the download. |
+
+Flip `ABLITERATED` like this:
+
+```bash
+# in .env.dspark
+ABLITERATED=1
+
+./prepare-dspark-model-cache.sh --yes    # or --abliterated / --official
+./stop-deepseek-v4-flash-dspark.sh
+./start-deepseek-v4-flash-dspark.sh
+```
+
+`--official` writes `ABLITERATED=0`; `--abliterated` writes `1`.
+
+If official Vision-Exp is already cached, overlay the 26 edited shards
+(~87 GiB) instead of re-fetching the full ~157 GiB dump:
+
+```bash
+python3 scripts/overlay-vision-exp-ablit-cache.py
+```
+
+The 0731 abliterated freeze stays on branch `0731-ablit`.
+
+Images: OpenAI `image_url` (JPEG/PNG/GIF/WebP; GIF is still-frame). No video.
+Images belong in **`user` messages only** — `system` or `assistant` returns HTTP 400.
+Default cap 8 images (`LIMIT_MM_PER_PROMPT` is JSON `{"image":8}`; `image=8` is converted). Example:
+
+```json
+{"model":"deepseek-v4-flash-vision-exp","messages":[{"role":"user","content":[
+  {"type":"image_url","image_url":{"url":"data:image/jpeg;base64,..."}},
+  {"type":"text","text":"What is in this picture?"}
+]}]}
+```
 
 Update the pin like this:
 
@@ -173,16 +214,13 @@ DSPARK_REVISION=<commit>
 ./start-deepseek-v4-flash-dspark.sh
 ```
 
-### Thinking, API, vision
+### Thinking, API
 
 | Variable | Default | What it does |
 | --- | --- | --- |
 | **`DEFAULT_THINKING`** | `max` | `off` / `low` / `high` / `max`. Request-level `chat_template_kwargs` still wins. |
 | `VLLM_HOST` | `0.0.0.0` | `127.0.0.1` for head-only tests. |
 | `VLLM_PORT` | `8888` | Or `./start-… --port 9000` for one launch. |
-| **`ENABLE_VL_SIDECAR`** | `0` | `1` = Qwen3-VL on `:8889` + MCP; also switches main util to `GPU_MEMORY_UTILIZATION_VISION`. |
-| `PREPARE_VL_SIDECAR_MODEL` | `0` | `1` = prepare also downloads VL weights. |
-| `INSTALL_VISION_MCP` | on when VL is on | `0` = sidecar only, skip harness MCP install. |
 
 An explicit `thinking_token_budget` is **off unless you set
 `DSPARK_ENABLE_ISSUE31_GPU_HOTFIX=1`** (then opt-in per request). Default
@@ -198,9 +236,9 @@ generous `max_tokens` or that budget hotfix, or thinking won't end. See
 | `MAX_NUM_SEQS` | `6` | Concurrent slots. `16` only with the 200K + Stage-C path. |
 | `MAX_NUM_BATCHED_TOKENS` | `8192` | Prefill tokens per step. `16384` for big-prompt coding. |
 | `LONG_PREFILL_TOKEN_THRESHOLD` | `1024` | Issue **#27** chunk cap. `0` lets one prefill eat the whole batch (decode starves). |
-| `GPU_MEMORY_UTILIZATION_TEXT` | `0.835` | Used when `ENABLE_VL_SIDECAR=0`. Larger = bigger KV pool. |
-| `GPU_MEMORY_UTILIZATION_VISION` | `0.80` | Used when VL is on. |
-| `MTP_NUM_TOKENS` | `5` | DSpark draft depth. Must be ≥ 5. Capture size = `seqs * (k+1)`. |
+| `GPU_MEMORY_UTILIZATION_TEXT` | `0.835` | Main GPU util / KV pool size. Larger = bigger KV pool. |
+| `LIMIT_MM_PER_PROMPT` | `{"image":8}` | Max images per request (Vision-Exp native `image_url`). `image=8` is converted to JSON for Anemll argparse. No video. |
+| `MTP_NUM_TOKENS` | `6` | DSpark draft depth. Vision-Exp `n_predict=3` so k must be ≥ 5 and divisible by 3. Capture size = `seqs * (k+1)`. |
 | `VLLM_USE_BREAKABLE_CUDAGRAPH` | `0` | **Keep 0.** Unset enables Anemll’s slower breakable graphs. |
 | `VLLM_PREFIX_CACHE_RETENTION_INTERVAL` | `4096` | Issue **#26** SWA prefix-cache spacing. Leave unless you are debugging warm-cache hits. |
 
@@ -338,7 +376,7 @@ answer:
 
 ```bash
 curl :8888/v1/chat/completions -H 'Content-Type: application/json' -d '{
-  "model":"deepseek-v4-flash-0731",
+  "model":"deepseek-v4-flash-vision-exp",
   "messages":[{"role":"user","content":"Design a small rate limiter."}],
   "max_tokens":4096,
   "thinking_token_budget":1024,
@@ -351,12 +389,12 @@ curl :8888/v1/chat/completions -H 'Content-Type: application/json' -d '{
 [`pi-models.dspark.example.json`](pi-models.dspark.example.json) ships
 `supportsThinkingTokenBudget: false` to match the server default
 (`DSPARK_ENABLE_ISSUE31_GPU_HOTFIX=0`). Copy it to `~/.pi/agent/models.json`;
-once the boot flag is `1`, flip the capability on the `deepseek-v4-flash-0731`
+once the boot flag is `1`, flip the capability on the `deepseek-v4-flash-vision-exp`
 model and pi attaches a `thinking_token_budget` whenever thinking is enabled:
 
 ```json
 {
-  "id": "deepseek-v4-flash-0731",
+  "id": "deepseek-v4-flash-vision-exp",
   "reasoning": true,
   "compat": {
     "supportsThinkingTokenBudget": true,
@@ -382,7 +420,7 @@ yet supported by the V2 model runner` — so keep the capability `false` unless
 
 | Knob | Meaning | This build |
 | --- | --- | --- |
-| KV pool | Shared blocks after weights load | ~2.49M tokens @ util 0.835 |
+| KV pool | Shared blocks after weights load | 2,331,430 tokens / 17.04 GiB @ util 0.83 |
 | `max_model_len` | Per-request **ceiling** | 1,048,576 |
 | `max_num_seqs` | Max **active** sequences | 6 |
 
@@ -393,7 +431,7 @@ yet supported by the V2 model runner` — so keep the capability `false` unless
 6 ×   1M  =  6.0M   impossible — extras queue
 ```
 
-The boot line `Maximum concurrency for 1,048,576 tokens … ~2.4x` only means a
+The boot line `Maximum concurrency for 1,048,576 tokens … 2.22x` only means a
 few *simultaneous full-1M* requests fit.
 
 ---
@@ -437,31 +475,15 @@ Compose is Anemll-shaped (`/usr/local/bin/vllm`, hotfixes under
 
 ---
 
-## Experimental: Vision
-
-Not the default ship. 0731 on `:8888` stays text-only. Optional Qwen3-VL-4B
-sidecar on `:8889` + `ds4f-vision` MCP. See
-[results/vl-nvfp4-coexist-2026-08-11.md](results/vl-nvfp4-coexist-2026-08-11.md).
-
-```env
-ENABLE_VL_SIDECAR=1
-PREPARE_VL_SIDECAR_MODEL=1
-```
-
-Then prepare, stop, start. Text-only util is **0.835**; vision drops main util
-to **0.80** and shrinks the 0731 KV pool.
-
----
-
 ## Runtime flags (default compose)
 
 - `/usr/local/bin/vllm serve` · TP=2 · `mp` · `nnodes 2`
 - `--kv-cache-dtype nvfp4_ds_mla` · `--block-size 256`
 - `--max-model-len 1048576` · `--max-num-seqs 6` · `--max-num-batched-tokens 8192`
 - `--long-prefill-token-threshold 1024` · `--enable-chunked-prefill` · `--async-scheduling`
-- `--max-cudagraph-capture-size` = `MAX_NUM_SEQS * (MTP_NUM_TOKENS + 1)` → 36 at 6×5
+- `--max-cudagraph-capture-size` = `MAX_NUM_SEQS * (MTP_NUM_TOKENS + 1)` → 42 at 6×6 (engine may truncate to 32)
 - `--moe-backend flashinfer_b12x` · `--generation-config vllm`
-- DSpark: `{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic"}`
+- DSpark: `{"method":"dspark","num_speculative_tokens":6,"draft_sample_method":"probabilistic"}`
 
 This is the **Stage C padded NVFP4** path (584-byte sparse-MLA envelope via
 `nvfp4_ds_mla`). It is not the abandoned 416-byte “true layout” experiment.
@@ -491,7 +513,7 @@ invalid-field errors, appended multi-turn prefix reuse, and disconnect cleanup:
 ```bash
 python3 scripts/verify-responses-api-live.py \
   --base-url http://127.0.0.1:8888/v1 \
-  --model deepseek-v4-flash-0731 \
+  --model deepseek-v4-flash-vision-exp \
   --output results/responses-api-live.json
 ```
 
@@ -504,7 +526,7 @@ HTTP 400 while the complete canonical output replay remains HTTP 200:
 ```bash
 python3 scripts/verify-issue138-responses-history-live.py \
   --base-url http://127.0.0.1:8888/v1 \
-  --model deepseek-v4-flash-0731 \
+  --model deepseek-v4-flash-vision-exp \
   --expect-legacy rejected \
   --output results/issue138-stock.json
 ```
@@ -534,9 +556,10 @@ only when the corresponding live behavior is outside the test scope.
 | --- | --- |
 | [results/RESULTS-2026-08-14.md](results/RESULTS-2026-08-14.md) | Dated benches and how to read them |
 | `.env.dspark.example` | Cluster template |
-| `docker-compose.dspark.yml` | Anemll serve (installs 0731 encoder + hotfixes) |
+| `docker-compose.dspark.yml` | Anemll serve (installs Vision-Exp encoder + hotfixes) |
 | `start-` / `stop-` / `status-` / `logs-` / `smoke-*.sh` | Two-node ops |
-| `prepare-dspark-model-cache.sh` | 0731 (and optional VL) on head **and** worker |
+| `prepare-dspark-model-cache.sh` | Vision-Exp weights on head **and** worker (`--official` / `--abliterated`) |
+| `scripts/overlay-vision-exp-ablit-cache.py` | Hardlink official Vision-Exp blobs + copy the 26 ablit shards |
 | `scripts/benchmark-0731.py` | Prompt × concurrency sweep |
 | `scripts/verify-responses-api-live.py` | Strict Responses, multi-turn cache, and disconnect gates |
 | `scripts/verify-issue138-responses-history-live.py` | Mode-strict stock/enabled full-history replay gate |
@@ -554,6 +577,11 @@ Full list: [`CREDITS.md`](CREDITS.md).
 
 **[drowzeys ("Keys")](https://github.com/drowzeys/)** — DSpark concurrency
 patch, ragged `query_start_loc`, `nvfp4_ds_mla` wiring.
+
+**[@u1tra_instinct](https://x.com/u1tra_instinct)** — abliterated Vision-Exp
+weights (`ABLITERATED=1`), from the original repo
+[`drowzeys/keys-DeepSeekV4Flash-Vision-EXP-ablit`](https://huggingface.co/drowzeys/keys-DeepSeekV4Flash-Vision-EXP-ablit).
+
 Also: [tonyd2wild](https://github.com/tonyd2wild/), Rafael Caricio, Fraser Price,
 [Anemll](https://github.com/Anemll/dspark-vllm-gx10), MiaAI-Lab packaging.
 
