@@ -2,12 +2,21 @@
 
 ### Fixed
 
+- **Vision-Exp image tokens now use `bias_vl` instead of the text MoE router ([Issue #175](https://github.com/MiaAI-Lab/DeepSeek-v4-Flash-DSpark-2x-DGX-Spark/issues/175))**: `e_score_correction_bias_vl` was loaded on every layer but `fused_topk_bias` always scored with text bias + `tid2eid`. Placeholder id 129264 is in-vocab, so hash layers 0–2 collapsed every image token onto `tid2eid[129264]`. Image rows now route with `bias_vl` and no hash table; text rows are unchanged; mixed batches split. CUDA graph capture takes the stock text path (no `.item()` on token ids). Recreate both containers after pull (`./stop` then `./start`); restart keeps the old overlay bytes.
+
 - **Vision-Exp role check no longer 400s when a tool result quotes image markers ([Issue #167](https://github.com/MiaAI-Lab/DeepSeek-v4-Flash-DSpark-2x-DGX-Spark/issues/167))**: `tool` / `function` message *text* is opaque (grep/cat of the hotfix, commit messages that mention `<image>`). Only a structured `image` / `image_url` part in those roles is rejected. System/assistant still use the issue #165 paired-tag + placeholder scan. Recreate both containers after pull (`./stop` then `./start`); restart keeps the old encoder bytes.
+
+- **Vision-Exp 40×19 image grids no longer merge 124 embeddings into 125 placeholders ([Issue #172](https://github.com/MiaAI-Lab/DeepSeek-v4-Flash-DSpark-2x-DGX-Spark/issues/172))**: N-layout block length is `122 + compress_pad` and `compress_pad` depends on `start_pos % 4`. vLLM's encoder cache hashed image bytes only, so the same photo at a shifted offset reused the wrong pad and killed EngineCore. Processor hashes are now salted with `num_tokens`; `embed_input_ids` rejects a count mismatch instead of doing a strict index-put. Recreate both containers after pull. Independent Docker `unless-stopped` restarts can still split a TP=2 pair (`DSPARK_RESTART_POLICY=no` + `./stop`/`./start` together).
+
+### Changed
+
+- **Worker HF NFS is opt-in** (`DSPARK_WORKER_HF_NFS=0` by default). `prepare` copies hub weights onto the worker. Set `DSPARK_WORKER_HF_NFS=1` to skip that copy: start exports head `HF_CACHE` via NFSv4 on ConnectX (reuses a live exporter such as `vllm-fn-nfs`) and the worker Docker volume `dspark-hf` mounts it read-only. Triton/TileLang/vLLM/FlashInfer/CuTe/NCCL-FR caches stay on the worker host as overlays. `./stop-… --nfs` tears down only `dspark-nfs`, not Qwen's share.
 
 ## 2026-08-31
 
 ### Fixed
 
+- **Vision-Exp `as_pil` no longer turns RGB CHW with width 1/3/4 into a black image**: the old last-axis `{1,3,4}` ⇒ HWC rule treated `np.transpose(pil, (2,0,1))` of a 4-wide RGB array as 3-pixel-tall RGBA. Leading C=3 is now CHW (unit test `(3, 6, 4)` → `(0, 22, 0)`). Normal photos (W∉{1,3,4}) were already correct. Restart both ranks so `/opt/dspark-patches/vision_exp` reloads.
 - **Vision-Exp role check no longer 400s on the literal substring `<image>` ([Issue #165](https://github.com/MiaAI-Lab/DeepSeek-v4-Flash-DSpark-2x-DGX-Spark/issues/165))**: system/assistant text that *mentions* the tag (opencode and other agent prompts) is allowed; only a paired `<image>…</image>` reference or a real `image`/`image_url` part is treated as an image. Recreate both containers after pull (`./stop` then `./start`); restart keeps the old encoder bytes.
 
 ### Changed
