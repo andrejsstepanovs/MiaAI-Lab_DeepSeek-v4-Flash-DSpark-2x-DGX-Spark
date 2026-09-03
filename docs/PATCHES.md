@@ -387,6 +387,43 @@ this implementation commit; the mode-strict two-turn run is the release gate.
 
 ---
 
+## Codex `agent_message` Responses history compatibility
+
+`patches/hotfix-vllm-codex-agent-message.py` source-locks the complete pinned
+`ResponsesRequest.input_item_parsing` method by SHA-256, plus the surrounding
+input union guards. It accepts either the stock method or the exact issue #138
+postimage and is invoked after issue138, so either opt-in can run alone. The
+issue138 patcher also recognizes the exact combined postimage; rerunning the
+configured issue138-then-Codex order on one writable layer is byte-idempotent.
+
+With `DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT=1`, the patch converts only an
+`agent_message` with non-empty string `id`, `author`, and `recipient`, exactly
+one content part containing string `type=input_text` and `text`, and either no
+internal metadata or the evidenced `turn_id` / numeric `create_time`
+dictionary. The result contains only `type=message`, `role=assistant`, and the
+original one-part content list. Extra or missing keys, empty, multipart, or
+malformed content, altered metadata, and all unknown types remain unchanged for
+stock Pydantic validation and therefore retain the prior rejection behavior.
+
+The conversion irreversibly drops `id`, `author`, `recipient`, and internal
+chat metadata. The model sees the text as assistant conversation history, but
+cannot recover routing or attribution. Do not enable this compatibility layer
+when those fields must be available to the model for audit or routing logic.
+
+The patcher uses the same atomic publish, mode preservation, fsync,
+post-publication verification, atomic rollback, and `--status` behavior as the
+issue138 patch, without importing vLLM or GPU dependencies. CPU verification:
+
+```bash
+python3 scripts/test-codex-agent-message-compat.py
+python3 scripts/test-python-hotfix-failclosed.py
+```
+
+Recreate both containers after toggling the flag; a restart does not revert a
+patched writable layer.
+
+---
+
 ## Issue #141 — sparse-MLA verify-decode chunking workaround (default OFF)
 
 ### Evidence and scope
@@ -614,3 +651,142 @@ flag, fixtures/tests, sync/preflight, and documentation together.
 
 Evidence currently checked in is CPU/source-exact only. Do not claim the live
 incident closed until the two-rank canary and log/health gate above pass.
+
+---
+
+## Issue #117 — bounded SHM dispatch-ring reader recovery
+
+### Scope and upstream fix
+
+The mid-serve failure addressed here is a local `MessageQueue` reader parked in
+`SpinCondition.wait()` after a PUB/SUB notification is missed. The dispatch is
+already authoritative in shared memory, but an indefinite socket poll prevents
+the reader from checking that slot again.
+
+`patches/hotfix-vllm-issue117-shm-ring-buffer.py` backports both changes from
+upstream vLLM PR #45224, merge
+`10c75477b07c2f1a361f54b7357af1019bba5fd8`:
+
+- `ReadTimeoutWithWarnings.timeout_ms()` is capped by the upstream
+  `SHM_READER_RECHECK_INTERVAL_MS = 5000`, including indefinite/no-warning
+  reads, so the authoritative written flag is checked again;
+- `acquire_read()` releases the reader slot, advances the ring index, and
+  records the read in `finally` even when the consumer raises.
+
+This is not an orphaned-SHM lifecycle fix. It does not enumerate, unlink, or
+reuse `/dev/shm/psm_*` objects and does not claim to fix the separate
+stop/start API-readiness failure associated with ownerless segments.
+
+### Compatibility and publication
+
+The patcher accepts only
+`vllm==0.25.2.dev0+g752a3a504.d20260714` and one of four complete-file
+identities: exact issue-117 stock or patched bytes, each with either the exact
+stock `busy_loop_s = 1` line or the independent issue #79
+`busy_loop_s = 0.002` overlay. It never changes that issue #79 line.
+
+Marker-only, partial, mixed, duplicated, independently drifted, symlinked, and
+unsupported-version states are incompatible. Compatibility checks are
+unconditional under `PYTHONOPTIMIZE=1`. A stock post-image is built and
+compiled in memory; rollback and candidate images are staged beside the
+target with retained mode/owner/group and file `fsync`, then one atomic rename
+publishes the candidate. The directory and published bytes are fsynced and
+re-read. Any post-publication failure atomically restores and verifies the
+original bytes and metadata. An exact patched image is verified without a
+write.
+
+### Startup and rollback
+
+The launcher syncs the dedicated patcher, checks worker then head without
+mutation, and only then starts either service. Each container applies the
+patcher and requires a successful `--status` before `exec vllm`.
+
+The backport is default-on. Set
+`DSPARK_SKIP_ISSUE117_RECHECK_HOTFIX=1`, then stop/remove and recreate both
+service containers, to restore image stock for issue #117 without changing the
+separate issue #79 spin-wait setting. A process or Docker restart reuses the
+writable layer and is not rollback.
+
+The hermetic behavior/source/transaction/startup suite is:
+
+```bash
+python3 scripts/test-issue117-shm-ring-buffer.py
+```
+
+---
+
+## Item 6 — sequence-parallel Lightning indexer for long prefills (default OFF)
+
+### Why
+
+`DeepseekV4Indexer` is replicated across TP ranks (`wq_b` / `weights_proj` are
+`ReplicatedLinear`), so every rank scores all 64 index heads against the whole
+compressed key range of every prefill query. At long context that O(queries ×
+keys) score is the dominant prefill cost (900K prefill ≈ 875 tok/s vs ≈ 2,500
+tok/s at 2K) and it is computed once per rank. Report:
+`docs/CLAUDE/fable5-1-report.md` §3.6.
+
+### What the patch does
+
+`patches/hotfix-dsv4-sp-indexer-prefill.py` edits
+`vllm/model_executor/layers/sparse_attn_indexer.py`. In the prefill loop, for a
+chunk with at least `DSPARK_SP_INDEXER_MIN_KEYS` compressed keys (default 8192
+= 32K tokens at compress ratio 4), TP rank `r`:
+
+1. splits every request's compressed key range into `tp` contiguous,
+   page-aligned slices (`_sp_indexer_split`) and gathers only its own slice
+   from the paged indexer cache (shifted block table, rank-local
+   `cu_seq_lens`);
+2. maps each query's global `[ks, ke)` onto its local rows
+   (`_sp_indexer_local_bounds`, causal bound clamped into the slice);
+3. runs the stock `fp8_fp4_mqa_logits` + `top_k_per_row_prefill` on the local
+   slice (half the logits, half the K gather at TP=2);
+4. packs `(score, global_id)` for its local top-k, all-gathers the candidates
+   across the TP group (`tp × index_topk × 8 B` per query) and runs vLLM's
+   DCP `stable_topk_from_gathered_candidates_cutedsl` into the shared
+   `topk_indices_buffer`.
+
+Exactness follows the DCP argument: a token in the global top-k is in its
+owning rank's local top-k, so merging local top-k sets equals top-k over the
+full row. Decode, chunks below the threshold, DCP>1, TP=1 and XPU keep the
+stock replicated path byte-for-byte. Control flow is symmetric across ranks
+(the decision uses CPU-side chunk metadata that is identical on all ranks), so
+the collective cannot desynchronize.
+
+### Flag (default OFF = stock)
+
+| value | behavior |
+|---|---|
+| `0` / unset / anything ≠ `1` | patcher not invoked; stock bytes |
+| `1` | apply at boot on both ranks, `|| exit 1` (fail-closed); `DSPARK_SP_INDEXER_MIN_KEYS` tunes the threshold at runtime |
+
+Recreate both containers when flipping (a restart keeps the patched layer).
+
+### Validation
+
+* CPU: `python3 tests/test_sp_indexer_prefill.py` — applies to the real image
+  file, idempotent, compiles; split/bounds math vs brute force for many request
+  shapes at TP 2/3/4 (page alignment, disjoint cover, per-query local range).
+* GPU (inside the image, one GPU, no process group): `scripts/test-sp-indexer-gpu.py`
+  runs the real kernels for emulated TP=2 and TP=3 and compares the merged top-k
+  against the stock full-range path (valid-candidate counts and score multisets).
+  Needs the DeepGEMM SM121 header alias below when the JIT cache is cold.
+* Live A/B still required: `scripts/bench-ttft.py` at 32K–900K prompts with
+  `DSPARK_ENABLE_SP_INDEXER=0/1`, plus `scripts/ruler-lite.py` for quality.
+
+---
+
+## DeepGEMM SM121 indexer-logits header alias (default OFF)
+
+The image's vendored DeepGEMM emits `sm121_fp8_mqa_logits<...>` and includes
+`impls/sm121_fp8_mqa_logits.cuh` on GB10 (CC 12.1) but ships only `sm120_*`
+headers. Production works because `VLLM_CACHE_ROOT/deep_gemm/cache/` already
+holds cubins built from `sm120_fp8_mqa_logits.cuh` (Jul 16 / Jul 27). A cache
+miss — fresh volume, new cache root, new index head count, the fp4 indexer path
+— fails at first use with `Failed to open .../sm121_fp8_mqa_logits.cuh`.
+
+`patches/hotfix-deepgemm-sm121-mqa-header-alias.sh` (gate
+`DSPARK_ENABLE_DEEPGEMM_SM121_ALIAS=1`) writes four alias headers
+(`#include <deep_gemm/impls/sm120_X.cuh>` + `#define sm121_X sm120_X`) for the
+fp8/fp4 × contiguous/paged mqa-logits kernels. Idempotent; `--status` reports.
+Details: `docs/CLAUDE/item8-fp4-kv-design.md` §5.

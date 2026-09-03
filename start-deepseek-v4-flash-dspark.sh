@@ -22,6 +22,7 @@ Options:
   --port PORT  vLLM API listen port (default: VLLM_PORT or 8888)
   -h, --help   Show this help message
 
+Two-node TP=2 is the default. Three nodes: ./start-tp3.sh (see docs/TP3.md).
 Command-line options override values from $ENV_FILE.
 EOF
 }
@@ -111,6 +112,17 @@ COMPOSE_ENV_FILE="$_dspark_env_clean"
 # the profile stays in one place.
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION_TEXT:-0.835}"
 export GPU_MEMORY_UTILIZATION
+
+# TP=3 concurrent slots: CLI (./start-tp3.sh --max-num-seqs) beats
+# TP3_MAX_NUM_SEQS in .env.dspark; both leave the 2-node MAX_NUM_SEQS alone.
+if [ "${DSPARK_TP3:-0}" = "1" ]; then
+  if [ -n "${_START_TP3_MAX_NUM_SEQS:-}" ]; then
+    MAX_NUM_SEQS="$_START_TP3_MAX_NUM_SEQS"
+  elif [ -n "${TP3_MAX_NUM_SEQS:-}" ]; then
+    MAX_NUM_SEQS="$TP3_MAX_NUM_SEQS"
+  fi
+  export MAX_NUM_SEQS
+fi
 
 # Checkpoint flag: official Vision-Exp vs Keys abliterated weights.
 #   ABLITERATED=0 → DSPARK_MODEL_OFFICIAL
@@ -254,6 +266,22 @@ if [ "$DSPARK_ENABLE_ISSUE138_RESPONSES_HISTORY_COMPAT" = "1" ] && [ ! -f "$DSPA
   exit 1
 fi
 # Issue #138 Responses history compatibility pre-flight (end).
+# Codex agent_message compatibility pre-flight (begin).
+case "${DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT:-0}" in
+  1) DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT=1 ;;
+  *) DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT=0 ;;
+esac
+DSPARK_CODEX_AGENT_MESSAGE_HOTFIX="${DSPARK_CODEX_AGENT_MESSAGE_HOTFIX:-patches/hotfix-vllm-codex-agent-message.py}"
+case "$DSPARK_CODEX_AGENT_MESSAGE_HOTFIX" in
+  /*) ;;
+  *) DSPARK_CODEX_AGENT_MESSAGE_HOTFIX="$SCRIPT_DIR/$DSPARK_CODEX_AGENT_MESSAGE_HOTFIX" ;;
+esac
+export DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT DSPARK_CODEX_AGENT_MESSAGE_HOTFIX
+if [ "$DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT" = "1" ] && [ ! -f "$DSPARK_CODEX_AGENT_MESSAGE_HOTFIX" ]; then
+  echo "error: Codex agent_message compatibility is enabled but patcher is missing: $DSPARK_CODEX_AGENT_MESSAGE_HOTFIX" >&2
+  exit 1
+fi
+# Codex agent_message compatibility pre-flight (end).
 # Issue #141 is exact-1 and default-off. Normalize the effective switch once so
 # head and worker receive the same 0/1 value, and fail before remote side effects
 # when an enabled start cannot mount the selected local patch source.
@@ -272,6 +300,45 @@ if [ "${DSPARK_ENABLE_ISSUE141_SPARSE_MLA_CHUNK:-0}" = "1" ]; then
 fi
 DSPARK_ENABLE_ISSUE141_SPARSE_MLA_CHUNK="$DSPARK_ISSUE141_EFFECTIVE"
 export DSPARK_ISSUE141_HOTFIX DSPARK_ENABLE_ISSUE141_SPARSE_MLA_CHUNK
+DSPARK_ISSUE117_HOTFIX="$SCRIPT_DIR/patches/hotfix-vllm-issue117-shm-ring-buffer.py"
+if [ "${DSPARK_SKIP_ISSUE117_RECHECK_HOTFIX:-0}" != "1" ] && { [ ! -f "$DSPARK_ISSUE117_HOTFIX" ] || [ -L "$DSPARK_ISSUE117_HOTFIX" ]; }; then
+  echo "Issue #117 SHM ring hotfix is enabled but its local patcher is missing or not a regular file: $DSPARK_ISSUE117_HOTFIX" >&2
+  exit 1
+fi
+# Report item 6: sequence-parallel Lightning indexer for long prefills.
+# Exact 1 applies the patcher at boot on both ranks (fail-closed); anything
+# else is normalized to 0 (stock bytes).
+DSPARK_SP_INDEXER_HOTFIX="${DSPARK_SP_INDEXER_HOTFIX:-$SCRIPT_DIR/patches/hotfix-dsv4-sp-indexer-prefill.py}"
+case "$DSPARK_SP_INDEXER_HOTFIX" in
+  /*) ;;
+  *) DSPARK_SP_INDEXER_HOTFIX="$SCRIPT_DIR/${DSPARK_SP_INDEXER_HOTFIX#./}" ;;
+esac
+DSPARK_SP_INDEXER_EFFECTIVE=0
+if [ "${DSPARK_ENABLE_SP_INDEXER:-0}" = "1" ]; then
+  DSPARK_SP_INDEXER_EFFECTIVE=1
+  if [ ! -f "$DSPARK_SP_INDEXER_HOTFIX" ]; then
+    echo "error: DSPARK_ENABLE_SP_INDEXER=1 but patch source is missing: $DSPARK_SP_INDEXER_HOTFIX" >&2
+    exit 1
+  fi
+fi
+DSPARK_ENABLE_SP_INDEXER="$DSPARK_SP_INDEXER_EFFECTIVE"
+export DSPARK_SP_INDEXER_HOTFIX DSPARK_ENABLE_SP_INDEXER
+# DeepGEMM SM121 indexer-logits header alias (opt-in, see item8 design §5).
+DSPARK_DEEPGEMM_ALIAS_HOTFIX="${DSPARK_DEEPGEMM_ALIAS_HOTFIX:-$SCRIPT_DIR/patches/hotfix-deepgemm-sm121-mqa-header-alias.sh}"
+case "$DSPARK_DEEPGEMM_ALIAS_HOTFIX" in
+  /*) ;;
+  *) DSPARK_DEEPGEMM_ALIAS_HOTFIX="$SCRIPT_DIR/${DSPARK_DEEPGEMM_ALIAS_HOTFIX#./}" ;;
+esac
+DSPARK_DEEPGEMM_ALIAS_EFFECTIVE=0
+if [ "${DSPARK_ENABLE_DEEPGEMM_SM121_ALIAS:-0}" = "1" ]; then
+  DSPARK_DEEPGEMM_ALIAS_EFFECTIVE=1
+  if [ ! -f "$DSPARK_DEEPGEMM_ALIAS_HOTFIX" ]; then
+    echo "error: DSPARK_ENABLE_DEEPGEMM_SM121_ALIAS=1 but patch source is missing: $DSPARK_DEEPGEMM_ALIAS_HOTFIX" >&2
+    exit 1
+  fi
+fi
+DSPARK_ENABLE_DEEPGEMM_SM121_ALIAS="$DSPARK_DEEPGEMM_ALIAS_EFFECTIVE"
+export DSPARK_DEEPGEMM_ALIAS_HOTFIX DSPARK_ENABLE_DEEPGEMM_SM121_ALIAS
 DSPARK_ISSUE136_XGRAMMAR_HOTFIX="${DSPARK_ISSUE136_XGRAMMAR_HOTFIX:-$SCRIPT_DIR/patches/hotfix-vllm-issue136-xgrammar-termination.py}"
 if [ "${DSPARK_ENABLE_ISSUE136_XGRAMMAR_HOTFIX:-0}" = "1" ] && { [ ! -f "$DSPARK_ISSUE136_XGRAMMAR_HOTFIX" ] || [ -L "$DSPARK_ISSUE136_XGRAMMAR_HOTFIX" ]; }; then
   echo "Issue #136 XGrammar hotfix is enabled but its local patcher is missing or not a regular file: $DSPARK_ISSUE136_XGRAMMAR_HOTFIX" >&2
@@ -285,6 +352,18 @@ export DSPARK_ISSUE136_XGRAMMAR_HOTFIX DSPARK_ENABLE_ISSUE136_XGRAMMAR_HOTFIX
 : "${NCCL_IB_HCA:?NCCL_IB_HCA must be set in $ENV_FILE}"
 : "${NCCL_SOCKET_IFNAME:?NCCL_SOCKET_IFNAME must be set in $ENV_FILE}"
 : "${DSPARK_VLLM_IMAGE:?DSPARK_VLLM_IMAGE must be set in $ENV_FILE}"
+
+# ./start-tp3.sh sets DSPARK_TP3=1. Ignore TP_SIZE/NNODES from .env on the
+# two-node path so a copied 3-node snippet cannot boot nnodes=3 with one worker.
+DSPARK_TP3="${DSPARK_TP3:-0}"
+if [ "$DSPARK_TP3" = "1" ]; then
+  TP_SIZE=3
+  NNODES=3
+else
+  TP_SIZE=2
+  NNODES=2
+fi
+export TP_SIZE NNODES DSPARK_TP3
 
 VLLM_HOST_IP="${VLLM_HOST_IP:-$MASTER_ADDR}"
 WORKER_VLLM_HOST_IP="${WORKER_VLLM_HOST_IP:-$WORKER_HOST}"
@@ -304,9 +383,33 @@ WORKER_NCCL_IB_HCA="${WORKER_NCCL_IB_HCA:-$NCCL_IB_HCA}"
 WORKER_NCCL_SOCKET_IFNAME="${WORKER_NCCL_SOCKET_IFNAME:-$NCCL_SOCKET_IFNAME}"
 WORKER_TP_SOCKET_IFNAME="${WORKER_TP_SOCKET_IFNAME:-${TP_SOCKET_IFNAME:-$WORKER_NCCL_SOCKET_IFNAME}}"
 WORKER_GLOO_SOCKET_IFNAME="${WORKER_GLOO_SOCKET_IFNAME:-${GLOO_SOCKET_IFNAME:-$WORKER_NCCL_SOCKET_IFNAME}}"
-# RoCEv2 GID index differs per node and drifts after reboot/link events.
-# Default: resolve from sysfs at launch (NCCL_IB_GID_AUTO=1). Do not reuse one
-# literal for both ranks — that wedges NCCL with "unhandled system error".
+WORKER2_HOST="${WORKER2_HOST:-}"
+WORKER2_VLLM_HOST_IP="${WORKER2_VLLM_HOST_IP:-$WORKER2_HOST}"
+WORKER2_DIR="${WORKER2_SCRIPT_DIR:-${WORKER2_DIR:-$WORKER_DIR}}"
+WORKER2_HF_CACHE="${WORKER2_HF_CACHE:-${WORKER_HF_CACHE:-}}"
+WORKER2_NCCL_IB_HCA="${WORKER2_NCCL_IB_HCA:-$WORKER_NCCL_IB_HCA}"
+WORKER2_NCCL_SOCKET_IFNAME="${WORKER2_NCCL_SOCKET_IFNAME:-$WORKER_NCCL_SOCKET_IFNAME}"
+WORKER2_TP_SOCKET_IFNAME="${WORKER2_TP_SOCKET_IFNAME:-${WORKER_TP_SOCKET_IFNAME}}"
+WORKER2_GLOO_SOCKET_IFNAME="${WORKER2_GLOO_SOCKET_IFNAME:-${WORKER_GLOO_SOCKET_IFNAME}}"
+WORKER2_NCCL_IB_GID_MATCH_IP="${WORKER2_NCCL_IB_GID_MATCH_IP:-}"
+ENV_WORKER2_NCCL_IB_GID_INDEX="${WORKER2_NCCL_IB_GID_INDEX:-}"
+WORKER2_NCCL_IB_GID_INDEX="${ENV_WORKER2_NCCL_IB_GID_INDEX}"
+if [ "$DSPARK_TP3" = "1" ]; then
+  : "${WORKER2_HOST:?WORKER2_HOST must be set in $ENV_FILE for ./start-tp3.sh}"
+  if [ ! -f "$SCRIPT_DIR/patches/tp3/apply_tp3_patch.py" ]; then
+    echo "Missing TP=3 patcher: $SCRIPT_DIR/patches/tp3/apply_tp3_patch.py" >&2
+    exit 1
+  fi
+  REMOTE_WORKER2_DIR="$(printf '%q' "$WORKER2_DIR")"
+  REMOTE_COMPOSE2="cd $REMOTE_WORKER2_DIR && env -u MASTER_ADDR -u MASTER_PORT -u NODE_RANK -u HEADLESS COMPOSE_DISABLE_ENV_FILE=1"
+  REMOTE_COMPOSE_FILE2="$REMOTE_WORKER2_DIR/docker-compose.dspark.yml"
+  REMOTE_ENV_FILE2="$REMOTE_WORKER2_DIR/.env.dspark"
+  REMOTE_VLLM_GB10_PATCH_DIR2="$REMOTE_WORKER2_DIR/vllm_patch_gb10"
+fi
+# RoCEv2 GID index differs per node/HCA and drifts after reboot/link events.
+# Default (NCCL_IB_GID_AUTO=1): validate every selected HCA/port from sysfs,
+# then leave NCCL_IB_GID_INDEX unset on both ranks — a pin is one global value
+# per rank, and NCCL selects the RoCEv2/IPv4 GID per HCA when it is absent.
 # Set NCCL_IB_GID_AUTO=0 and pin NCCL_IB_GID_INDEX / WORKER_NCCL_IB_GID_INDEX
 # only if you need a manual override.
 NCCL_IB_GID_AUTO="${NCCL_IB_GID_AUTO:-1}"
@@ -345,6 +448,8 @@ host_without_user() {
 
 WORKER_COMPOSE_FILES="-f docker-compose.dspark.yml"
 WORKER_HF_COMPOSE_ENV="HF_CACHE='$WORKER_HF_CACHE'"
+WORKER2_COMPOSE_FILES="-f docker-compose.dspark.yml"
+WORKER2_HF_COMPOSE_ENV="HF_CACHE='$WORKER2_HF_CACHE'"
 if [ "$DSPARK_WORKER_HF_NFS" = "1" ]; then
   IFACE="${NFS_IFACE:-$NCCL_SOCKET_IFNAME}"
   HF_CACHE_DIR="${HF_CACHE:-$HOME/.cache/huggingface}"
@@ -355,6 +460,11 @@ if [ "$DSPARK_WORKER_HF_NFS" = "1" ]; then
   WORKER_COMPOSE_FILES="-f docker-compose.dspark.yml -f docker-compose.dspark-nfs.override.yml"
   WORKER_HF_COMPOSE_ENV="HF_CACHE='$NFS_VOLUME' DSPARK_JIT_CACHE='$WORKER_HF_CACHE'"
   REMOTE_NFS_OVERRIDE_FILE="$REMOTE_WORKER_DIR/docker-compose.dspark-nfs.override.yml"
+  if [ "$DSPARK_TP3" = "1" ]; then
+    WORKER2_COMPOSE_FILES="-f docker-compose.dspark.yml -f docker-compose.dspark-nfs.override.yml"
+    WORKER2_HF_COMPOSE_ENV="HF_CACHE='$NFS_VOLUME' DSPARK_JIT_CACHE='$WORKER2_HF_CACHE'"
+    REMOTE_NFS_OVERRIDE_FILE2="$REMOTE_WORKER2_DIR/docker-compose.dspark-nfs.override.yml"
+  fi
 fi
 
 ipv4_to_gid_suffix() {
@@ -403,13 +513,11 @@ iface_ipv4() {
 # tree, validates every selected member against its own local address (one
 # shared match IP must not silently drop a member that uses another link
 # address), and fails closed - exit 1 when a selected member has no usable
-# RoCEv2 GID, exit 3 when the selected members share no usable index.
-#
-# Members are reconciled by intersecting each member's *set* of usable RoCEv2
-# GID indexes. A member often has more than one usable index, so picking a
-# single winner per member and comparing those would report a disagreement even
-# when a common global index exists. NCCL_IB_GID_INDEX is one value per rank, so
-# only a genuinely empty intersection is fatal.
+# RoCEv2 GID. It stops there: usable index sets are reported per member and
+# never reconciled, because auto mode pins nothing. NCCL selects the
+# RoCEv2/IPv4 GID per HCA when NCCL_IB_GID_INDEX is absent, so members whose
+# usable sets are disjoint are still fine; only a member with no usable GID
+# at all is fatal.
 #
 # Body is a quoted heredoc (nothing expands here); resolve_rocev2_gid_index
 # prepends the inputs as printf %q assignments, so selector tokens are
@@ -561,8 +669,6 @@ fi
 
 fail_members=""
 mem_n=0
-have_common=0
-common=""
 for pair in $selected; do
   dev=${pair%%:*}
   port=${pair##*:}
@@ -595,68 +701,33 @@ for pair in $selected; do
     fail_members="$fail_members $dev:$port"
     continue
   fi
-  if [ "$have_common" = 0 ]; then
-    common=$usable
-    have_common=1
-  else
-    newcommon=""
-    for a in $common; do
-      for b in $usable; do
-        if [ "$a" = "$b" ]; then newcommon="$newcommon $a"; break; fi
-      done
-    done
-    common=$newcommon
-  fi
 done
 if [ -n "$fail_members" ]; then
   echo "FATAL: no usable RoCEv2 GID on selected member(s):$fail_members (no GID matches $match_ip or an IPv4 on the member's own netdev)" >&2
   exit 1
 fi
-if [ -z "$common" ]; then
-  detail=""
-  i=1
-  while [ "$i" -le "$mem_n" ]; do
-    eval "pair=\$mem_pair_$i"
-    eval "u=\$mem_usable_$i"
-    csv=""
-    for x in $u; do csv="$csv,$x"; done
-    detail="$detail $pair=${csv#,}"
-    i=$((i + 1))
-  done
-  echo "FATAL: selected members share no common RoCEv2 GID index:$detail" >&2
-  exit 3
-fi
-# Deterministic pick from the intersection: lowest index, preferring one that
-# at least one member reached through the preferred match IP.
-chosen=""
-fallback=""
-for g in $(printf '%s\n' $common | sort -n); do
-  [ -n "$fallback" ] || fallback=$g
-  i=1
-  while [ "$i" -le "$mem_n" ]; do
-    eval "s=\${src_${i}_$g:-}"
-    case "$s" in "match-ip "*) chosen=$g ;; esac
-    [ -n "$chosen" ] && break
-    i=$((i + 1))
-  done
-  [ -n "$chosen" ] && break
-done
-[ -n "$chosen" ] || chosen=$fallback
+# Validation-only outcome: audit each member's whole usable set. No index is
+# chosen and nothing is written to stdout - the caller leaves
+# NCCL_IB_GID_INDEX unset so NCCL selects the RoCEv2/IPv4 GID per HCA.
 i=1
 while [ "$i" -le "$mem_n" ]; do
   eval "pair=\$mem_pair_$i"
-  eval "s=\${src_${i}_$chosen:-}"
-  echo "  member $pair -> RoCEv2 gid index $chosen (via $s)" >&2
+  eval "u=\$mem_usable_$i"
+  for g in $u; do
+    eval "s=\${src_${i}_$g:-}"
+    echo "  member $pair -> RoCEv2 gid index $g (via $s)" >&2
+  done
   i=$((i + 1))
 done
-echo "$chosen"
 exit 0
 RESOLVER
 )"
 
-# Resolve the RoCEv2 GID index for every member an NCCL_IB_HCA selector picks
-# on the target node. stdout: the single agreed index. Exit 1 = a selected
-# member is missing/unresolvable (fail closed), exit 3 = members disagree.
+# Validate that every member an NCCL_IB_HCA selector picks on the target node
+# exposes a usable RoCEv2 GID (RoCE v2 type whose address matches the preferred
+# IPv4 or an IPv4 on the member's own netdev). Per-member usable indexes are
+# audited on stderr; nothing is written to stdout. Exit 1 = a selected member
+# is missing/unresolvable (fail closed).
 # $1=ssh target (empty=local)  $2=NCCL_IB_HCA selector  $3=preferred IPv4
 resolve_rocev2_gid_index() {
   local ssh_target="$1" hca_spec="$2" match_ip="$3"
@@ -700,7 +771,7 @@ pick_gid_match_ip() {
 }
 
 resolve_nccl_gid_indexes() {
-  local head_match worker_match resolved_head resolved_worker rc
+  local head_match worker_match
 
   if [ "$NCCL_IB_GID_AUTO" = "0" ]; then
     NCCL_IB_GID_INDEX="${ENV_NCCL_IB_GID_INDEX:-}"
@@ -709,7 +780,18 @@ resolve_nccl_gid_indexes() {
       echo "NCCL_IB_GID_AUTO=0 requires NCCL_IB_GID_INDEX and preferably WORKER_NCCL_IB_GID_INDEX in $ENV_FILE." >&2
       exit 1
     fi
-    echo "Using pinned NCCL GID indexes (auto off): head=$NCCL_IB_GID_INDEX worker=$WORKER_NCCL_IB_GID_INDEX"
+    if [ "${DSPARK_TP3:-0}" = "1" ]; then
+      WORKER2_NCCL_IB_GID_INDEX="${ENV_WORKER2_NCCL_IB_GID_INDEX:-$WORKER_NCCL_IB_GID_INDEX}"
+      if [ -z "$WORKER2_NCCL_IB_GID_INDEX" ]; then
+        echo "NCCL_IB_GID_AUTO=0 requires WORKER2_NCCL_IB_GID_INDEX (or WORKER_NCCL_IB_GID_INDEX) in $ENV_FILE." >&2
+        exit 1
+      fi
+    fi
+    if [ "${DSPARK_TP3:-0}" = "1" ]; then
+      echo "Using pinned NCCL GID indexes (auto off): head=$NCCL_IB_GID_INDEX worker=$WORKER_NCCL_IB_GID_INDEX worker2=$WORKER2_NCCL_IB_GID_INDEX"
+    else
+      echo "Using pinned NCCL GID indexes (auto off): head=$NCCL_IB_GID_INDEX worker=$WORKER_NCCL_IB_GID_INDEX"
+    fi
     return 0
   fi
 
@@ -722,60 +804,65 @@ resolve_nccl_gid_indexes() {
     exit 1
   }
 
-  echo "Resolving RoCEv2 GID indexes from sysfs (head if=$NCCL_SOCKET_IFNAME ip=$head_match selector=$NCCL_IB_HCA; worker if=$WORKER_NCCL_SOCKET_IFNAME ip=$worker_match selector=$WORKER_NCCL_IB_HCA)..."
-  resolved_head="$(resolve_rocev2_gid_index "" "$NCCL_IB_HCA" "$head_match")" || {
-    rc=$?
-    if [ "$rc" -eq 3 ]; then
-      echo "FATAL: HCA/ports selected by NCCL_IB_HCA=$NCCL_IB_HCA on the head share no common RoCEv2 GID index (see the per-member usable sets above)." >&2
-      echo "NCCL_IB_GID_INDEX is one global value per rank, so no single pin can satisfy that selection - narrow NCCL_IB_HCA to members that share an index." >&2
-    else
-      echo "FATAL: could not resolve head RoCEv2 GID index (NCCL_IB_HCA=$NCCL_IB_HCA, match $head_match)." >&2
-      echo "Check: ibstat ; show_gids   # every selected member must exist under /sys/class/infiniband with a usable RoCE v2 GID" >&2
-    fi
+  echo "Validating RoCEv2 GIDs from sysfs (head if=$NCCL_SOCKET_IFNAME ip=$head_match selector=$NCCL_IB_HCA; worker if=$WORKER_NCCL_SOCKET_IFNAME ip=$worker_match selector=$WORKER_NCCL_IB_HCA)..."
+  resolve_rocev2_gid_index "" "$NCCL_IB_HCA" "$head_match" || {
+    echo "FATAL: could not validate head RoCEv2 GIDs (NCCL_IB_HCA=$NCCL_IB_HCA, match $head_match)." >&2
+    echo "Check: ibstat ; show_gids   # every selected member must exist under /sys/class/infiniband with a usable RoCE v2 GID" >&2
     exit 1
   }
-  if ! [[ "$resolved_head" =~ ^[0-9]+$ ]]; then
-    echo "FATAL: head RoCEv2 GID resolver returned invalid output." >&2
-    exit 1
-  fi
-
-  resolved_worker="$(resolve_rocev2_gid_index "$WORKER_HOST" "$WORKER_NCCL_IB_HCA" "$worker_match")" || {
-    rc=$?
-    if [ "$rc" -eq 3 ]; then
-      echo "FATAL: HCA/ports selected by WORKER_NCCL_IB_HCA=$WORKER_NCCL_IB_HCA on the worker share no common RoCEv2 GID index (see the per-member usable sets above)." >&2
-      echo "NCCL_IB_GID_INDEX is one global value per rank, so no single pin can satisfy that selection - narrow WORKER_NCCL_IB_HCA to members that share an index." >&2
-    else
-      echo "FATAL: could not resolve worker RoCEv2 GID index (WORKER_NCCL_IB_HCA=$WORKER_NCCL_IB_HCA, match $worker_match)." >&2
-      echo "Check on worker: ibstat ; show_gids" >&2
-    fi
+  resolve_rocev2_gid_index "$WORKER_HOST" "$WORKER_NCCL_IB_HCA" "$worker_match" || {
+    echo "FATAL: could not validate worker RoCEv2 GIDs (WORKER_NCCL_IB_HCA=$WORKER_NCCL_IB_HCA, match $worker_match)." >&2
+    echo "Check on worker: ibstat ; show_gids" >&2
     exit 1
   }
 
-  if ! [[ "$resolved_worker" =~ ^[0-9]+$ ]]; then
-    echo "FATAL: worker RoCEv2 GID resolver returned invalid output." >&2
-    exit 1
+  # AUTO=1 pins nothing: report and drop any stale pins from the env file.
+  if [ -n "$ENV_NCCL_IB_GID_INDEX" ]; then
+    echo "Note: ignoring NCCL_IB_GID_INDEX=$ENV_NCCL_IB_GID_INDEX from $ENV_FILE (NCCL_IB_GID_AUTO=1 leaves GID selection to NCCL per HCA)."
   fi
+  if [ -n "$ENV_WORKER_NCCL_IB_GID_INDEX" ]; then
+    echo "Note: ignoring WORKER_NCCL_IB_GID_INDEX=$ENV_WORKER_NCCL_IB_GID_INDEX from $ENV_FILE (NCCL_IB_GID_AUTO=1 leaves GID selection to NCCL per HCA)."
+  fi
+  NCCL_IB_GID_INDEX=""
+  WORKER_NCCL_IB_GID_INDEX=""
+  echo "RoCEv2 GIDs validated on both ranks; NCCL_IB_GID_INDEX left unset so NCCL selects the RoCEv2/IPv4 GID per HCA."
 
-  if [ -n "$ENV_NCCL_IB_GID_INDEX" ] && [ "$ENV_NCCL_IB_GID_INDEX" != "$resolved_head" ]; then
-    echo "Note: $ENV_FILE has NCCL_IB_GID_INDEX=$ENV_NCCL_IB_GID_INDEX but sysfs resolved head=$resolved_head (using resolved)."
+  if [ "${DSPARK_TP3:-0}" = "1" ]; then
+    local worker2_match
+    worker2_match="$(pick_gid_match_ip "$WORKER2_HOST" "$WORKER2_NCCL_SOCKET_IFNAME" "$WORKER2_NCCL_IB_GID_MATCH_IP" "$WORKER2_VLLM_HOST_IP" "$WORKER2_HOST")" || {
+      echo "FATAL: could not determine worker2 RoCE IPv4 for GID match (if=$WORKER2_NCCL_SOCKET_IFNAME)." >&2
+      exit 1
+    }
+    echo "Validating RoCEv2 GIDs for worker2 (if=$WORKER2_NCCL_SOCKET_IFNAME ip=$worker2_match selector=$WORKER2_NCCL_IB_HCA)..."
+    resolve_rocev2_gid_index "$WORKER2_HOST" "$WORKER2_NCCL_IB_HCA" "$worker2_match" || {
+      echo "FATAL: could not validate worker2 RoCEv2 GIDs (WORKER2_NCCL_IB_HCA=$WORKER2_NCCL_IB_HCA, match $worker2_match)." >&2
+      echo "Check on worker2: ibstat ; show_gids" >&2
+      exit 1
+    }
+    if [ -n "${ENV_WORKER2_NCCL_IB_GID_INDEX:-}" ]; then
+      echo "Note: ignoring WORKER2_NCCL_IB_GID_INDEX=$ENV_WORKER2_NCCL_IB_GID_INDEX from $ENV_FILE (NCCL_IB_GID_AUTO=1 leaves GID selection to NCCL per HCA)."
+    fi
+    WORKER2_NCCL_IB_GID_INDEX=""
+    echo "RoCEv2 GIDs validated on worker2; NCCL_IB_GID_INDEX left unset."
   fi
-  if [ -n "$ENV_WORKER_NCCL_IB_GID_INDEX" ] && [ "$ENV_WORKER_NCCL_IB_GID_INDEX" != "$resolved_worker" ]; then
-    echo "Note: $ENV_FILE has WORKER_NCCL_IB_GID_INDEX=$ENV_WORKER_NCCL_IB_GID_INDEX but sysfs resolved worker=$resolved_worker (using resolved)."
-  fi
-
-  NCCL_IB_GID_INDEX="$resolved_head"
-  WORKER_NCCL_IB_GID_INDEX="$resolved_worker"
-  echo "RoCEv2 GID index: head=$NCCL_IB_GID_INDEX (match $head_match) worker=$WORKER_NCCL_IB_GID_INDEX (match $worker_match)"
 }
 
 remote_nccl_env() {
   # Rebuild each call so GID resolve after early init is visible on the worker.
-  printf "NCCL_IB_HCA='%s' NCCL_SOCKET_IFNAME='%s' TP_SOCKET_IFNAME='%s' GLOO_SOCKET_IFNAME='%s' NCCL_IB_GID_INDEX='%s' VLLM_HOST='%s' VLLM_PORT='%s'" \
+  # NCCL_IB_GID_INDEX is always emitted, even empty under NCCL_IB_GID_AUTO=1:
+  # the empty process-env value overrides a stale worker .env.dspark entry at
+  # compose interpolation, and the shared entrypoint normalization makes the
+  # defined-empty variable truly absent in the container (NCCL would parse a
+  # defined-empty value as GID index 0).
+  printf "NCCL_IB_HCA='%s' NCCL_SOCKET_IFNAME='%s' TP_SOCKET_IFNAME='%s' GLOO_SOCKET_IFNAME='%s' NCCL_IB_GID_INDEX='%s' NCCL_IB_MERGE_NICS='%s' NCCL_IB_SUBNET_AWARE_ROUTING='%s' NCCL_IB_SUBNET_PREFIX_LEN='%s' VLLM_HOST='%s' VLLM_PORT='%s'" \
     "$WORKER_NCCL_IB_HCA" \
     "$WORKER_NCCL_SOCKET_IFNAME" \
     "$WORKER_TP_SOCKET_IFNAME" \
     "$WORKER_GLOO_SOCKET_IFNAME" \
     "$WORKER_NCCL_IB_GID_INDEX" \
+    "${NCCL_IB_MERGE_NICS:-}" \
+    "${NCCL_IB_SUBNET_AWARE_ROUTING:-}" \
+    "${NCCL_IB_SUBNET_PREFIX_LEN:-}" \
     "$VLLM_HOST" \
     "$VLLM_PORT"
 }
@@ -787,7 +874,12 @@ compose_base() {
     MASTER_PORT="$MASTER_PORT" \
     NCCL_IB_HCA="$NCCL_IB_HCA" \
     NCCL_SOCKET_IFNAME="$NCCL_SOCKET_IFNAME" \
+    TP_SOCKET_IFNAME="${TP_SOCKET_IFNAME:-$NCCL_SOCKET_IFNAME}" \
+    GLOO_SOCKET_IFNAME="${GLOO_SOCKET_IFNAME:-$NCCL_SOCKET_IFNAME}" \
     NCCL_IB_GID_INDEX="${NCCL_IB_GID_INDEX:-}" \
+    NCCL_IB_MERGE_NICS="${NCCL_IB_MERGE_NICS:-}" \
+    NCCL_IB_SUBNET_AWARE_ROUTING="${NCCL_IB_SUBNET_AWARE_ROUTING:-}" \
+    NCCL_IB_SUBNET_PREFIX_LEN="${NCCL_IB_SUBNET_PREFIX_LEN:-}" \
     VLLM_HOST="$VLLM_HOST" \
     VLLM_PORT="$VLLM_PORT" \
     VLLM_HOST_IP="$VLLM_HOST_IP" \
@@ -797,15 +889,36 @@ compose_base() {
     ENABLE_VLLM_GB10_PATCH="$ENABLE_VLLM_GB10_PATCH" \
     VLLM_GB10_PATCH_DIR="$VLLM_GB10_PATCH_DIR" \
     GB10_HYBRID_NVFP4_M_THRESHOLD="${GB10_HYBRID_NVFP4_M_THRESHOLD:-128}" \
+    TP_SIZE="$TP_SIZE" \
+    NNODES="$NNODES" \
+    TP3_PATCH_DIR="${TP3_PATCH_DIR:-$SCRIPT_DIR/patches/tp3}" \
     NODE_RANK="$1" \
     HEADLESS="$2" \
     docker compose -p "$PROJECT_NAME" --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" "${@:3}"
 }
 
+remote_nccl_env2() {
+  printf "NCCL_IB_HCA='%s' NCCL_SOCKET_IFNAME='%s' TP_SOCKET_IFNAME='%s' GLOO_SOCKET_IFNAME='%s' NCCL_IB_GID_INDEX='%s' NCCL_IB_MERGE_NICS='%s' NCCL_IB_SUBNET_AWARE_ROUTING='%s' NCCL_IB_SUBNET_PREFIX_LEN='%s' VLLM_HOST='%s' VLLM_PORT='%s'" \
+    "$WORKER2_NCCL_IB_HCA" \
+    "$WORKER2_NCCL_SOCKET_IFNAME" \
+    "$WORKER2_TP_SOCKET_IFNAME" \
+    "$WORKER2_GLOO_SOCKET_IFNAME" \
+    "$WORKER2_NCCL_IB_GID_INDEX" \
+    "${NCCL_IB_MERGE_NICS:-}" \
+    "${NCCL_IB_SUBNET_AWARE_ROUTING:-}" \
+    "${NCCL_IB_SUBNET_PREFIX_LEN:-}" \
+    "$VLLM_HOST" \
+    "$VLLM_PORT"
+}
+
 remote_compose() {
   # The head may use an absolute local mount override; the worker always uses
   # the canonical synced relative path.
-  ssh "$WORKER_HOST" "$REMOTE_COMPOSE DSPARK_ENABLE_ISSUE136_XGRAMMAR_HOTFIX=$REMOTE_ISSUE136_ENABLE DSPARK_ISSUE136_XGRAMMAR_HOTFIX='./patches/hotfix-vllm-issue136-xgrammar-termination.py' $(remote_nccl_env) $*"
+  ssh "$WORKER_HOST" "$REMOTE_COMPOSE DSPARK_ENABLE_ISSUE136_XGRAMMAR_HOTFIX=$REMOTE_ISSUE136_ENABLE DSPARK_ISSUE136_XGRAMMAR_HOTFIX='./patches/hotfix-vllm-issue136-xgrammar-termination.py' TP_SIZE='$TP_SIZE' NNODES='$NNODES' TP3_PATCH_DIR='./patches/tp3' $(remote_nccl_env) $*"
+}
+
+remote_compose2() {
+  ssh "$WORKER2_HOST" "$REMOTE_COMPOSE2 DSPARK_ENABLE_ISSUE136_XGRAMMAR_HOTFIX=$REMOTE_ISSUE136_ENABLE DSPARK_ISSUE136_XGRAMMAR_HOTFIX='./patches/hotfix-vllm-issue136-xgrammar-termination.py' TP_SIZE='$TP_SIZE' NNODES='$NNODES' TP3_PATCH_DIR='./patches/tp3' $(remote_nccl_env2) $*"
 }
 
 log_since() {
@@ -817,6 +930,9 @@ print_startup_logs() {
 
   compose_base 0 "" logs --since "$since" vllm-dspark || true
   remote_compose "docker compose -p '$PROJECT_NAME' --env-file .env.dspark -f docker-compose.dspark.yml logs --since '$since' vllm-dspark" || true
+  if [ "$DSPARK_TP3" = "1" ]; then
+    remote_compose2 "docker compose -p '$PROJECT_NAME' --env-file .env.dspark -f docker-compose.dspark.yml logs --since '$since' vllm-dspark" || true
+  fi
 }
 
 wait_with_startup_logs() {
@@ -830,6 +946,9 @@ wait_with_startup_logs() {
 print_initial_startup_logs() {
   compose_base 0 "" logs --tail=100 vllm-dspark || true
   remote_compose "docker compose -p '$PROJECT_NAME' --env-file .env.dspark -f docker-compose.dspark.yml logs --tail=100 vllm-dspark" || true
+  if [ "$DSPARK_TP3" = "1" ]; then
+    remote_compose2 "docker compose -p '$PROJECT_NAME' --env-file .env.dspark -f docker-compose.dspark.yml logs --tail=100 vllm-dspark" || true
+  fi
 }
 
 print_failure_logs() {
@@ -839,6 +958,10 @@ print_failure_logs() {
   compose_base 0 "" logs --since "$since" vllm-dspark >&2 || true
   echo "Recent worker logs:" >&2
   remote_compose "docker compose -p '$PROJECT_NAME' --env-file .env.dspark -f docker-compose.dspark.yml logs --since '$since' vllm-dspark" >&2 || true
+  if [ "$DSPARK_TP3" = "1" ]; then
+    echo "Recent worker2 logs:" >&2
+    remote_compose2 "docker compose -p '$PROJECT_NAME' --env-file .env.dspark -f docker-compose.dspark.yml logs --since '$since' vllm-dspark" >&2 || true
+  fi
 }
 
 on_error() {
@@ -861,7 +984,11 @@ print_resolved_profile() {
   echo "  model: ${DSPARK_MODEL:-deepseek-ai/DeepSeek-V4-Flash-DSpark}"
   echo "  served model: ${SERVED_MODEL_NAME:-deepseek-v4-flash-dspark}"
   echo "  max model len: ${MAX_MODEL_LEN:-1000000}"
-  echo "  max num seqs: ${MAX_NUM_SEQS:-6}"
+  if [ "${DSPARK_TP3:-0}" = "1" ]; then
+    echo "  max num seqs: ${MAX_NUM_SEQS:-6} (TP=3; CUDA-graph capture $(( ${MAX_NUM_SEQS:-6} * (${MTP_NUM_TOKENS:-6} + 1) )))"
+  else
+    echo "  max num seqs: ${MAX_NUM_SEQS:-6}"
+  fi
   echo "  max batched tokens: ${MAX_NUM_BATCHED_TOKENS:-8192}"
   echo "  gpu memory utilization: ${GPU_MEMORY_UTILIZATION:-0.835} (from GPU_MEMORY_UTILIZATION_TEXT=${GPU_MEMORY_UTILIZATION_TEXT:-0.835})"
   echo "  mtp speculative tokens: ${MTP_NUM_TOKENS:-6} (Vision-Exp: >=5 and divisible by 3)"
@@ -872,19 +999,40 @@ print_resolved_profile() {
   else
     echo "  issue138 Responses history compatibility: 0 (stock)"
   fi
+  if [ "$DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT" = "1" ]; then
+    echo "  Codex agent_message compatibility: 1 (apply)"
+  else
+    echo "  Codex agent_message compatibility: 0 (stock)"
+  fi
   echo "  issue136 XGrammar termination hotfix: ${DSPARK_ENABLE_ISSUE136_XGRAMMAR_HOTFIX:-0} (0=stock / 1=preflight+apply)"
+  if [ "${DSPARK_SKIP_ISSUE117_RECHECK_HOTFIX:-0}" = "1" ]; then
+    echo "  issue117 SHM ring hotfix: skipped (issue79 remains independent)"
+  else
+    echo "  issue117 SHM ring hotfix: preflight+apply (5000ms reader recheck)"
+  fi
   echo "  issue133 Triton specialization hotfix: will apply on start"
   echo "  issue141 sparse-MLA fixed-64 workaround: $DSPARK_ISSUE141_EFFECTIVE (0=stock / 1=apply)"
-  echo "  cudagraph capture size: $(( ${MAX_NUM_SEQS:-6} * (${MTP_NUM_TOKENS:-6} + 1) ))"
+  echo "  SP indexer prefill (item 6): $DSPARK_SP_INDEXER_EFFECTIVE (0=stock / 1=apply; min keys ${DSPARK_SP_INDEXER_MIN_KEYS:-8192})"
+  echo "  DeepGEMM sm121 header alias: $DSPARK_DEEPGEMM_ALIAS_EFFECTIVE (0=stock / 1=apply)"
+  echo "  cudagraph capture size: $(( ( ${MAX_NUM_SEQS:-6} * (${MTP_NUM_TOKENS:-6} + 1) + 7 ) / 8 * 8 )) (rounded up to a multiple of 8 so spec-decode keeps the full-concurrency shape)"
   echo "  API bind: $VLLM_HOST:$VLLM_PORT"
   echo "  API probe: $API_URL"
   echo "  head fabric IP: $VLLM_HOST_IP"
   echo "  worker host/ip: $WORKER_HOST / $WORKER_VLLM_HOST_IP"
+  if [ "$DSPARK_TP3" = "1" ]; then
+    echo "  tensor parallel / nnodes: $TP_SIZE / $NNODES (start-tp3)"
+    echo "  worker2 host/ip: $WORKER2_HOST / $WORKER2_VLLM_HOST_IP"
+    echo "  worker2 NCCL HCA/if: $WORKER2_NCCL_IB_HCA / $WORKER2_NCCL_SOCKET_IFNAME"
+    echo "  worker2 NCCL_IB_GID_INDEX: ${WORKER2_NCCL_IB_GID_INDEX:-}"
+    echo "  worker2 dir: $WORKER2_DIR"
+  else
+    echo "  tensor parallel / nnodes: $TP_SIZE / $NNODES"
+  fi
   echo "  head NCCL HCA/if: $NCCL_IB_HCA / $NCCL_SOCKET_IFNAME"
   echo "  worker NCCL HCA/if: $WORKER_NCCL_IB_HCA / $WORKER_NCCL_SOCKET_IFNAME"
   echo "  NCCL_IB_GID_AUTO: $NCCL_IB_GID_AUTO"
-  echo "  head NCCL_IB_GID_INDEX: ${NCCL_IB_GID_INDEX:-}"
-  echo "  worker NCCL_IB_GID_INDEX: ${WORKER_NCCL_IB_GID_INDEX:-}"
+  echo "  head NCCL_IB_GID_INDEX: ${NCCL_IB_GID_INDEX:-<unset>}"
+  echo "  worker NCCL_IB_GID_INDEX: ${WORKER_NCCL_IB_GID_INDEX:-<unset>}"
   echo "  worker dir: $WORKER_DIR"
   if [ "$DSPARK_WORKER_HF_NFS" = "1" ]; then
     echo "  worker weights: NFS $NFS_VOLUME from ${NFS_SERVER_IP:-$IFACE} (head $HF_CACHE_DIR, no worker copy)"
@@ -929,7 +1077,11 @@ validate_compose() {
   echo "Validating head compose config..."
   compose_base 0 "" config --quiet
   echo "Validating worker compose config..."
-  remote_compose "NODE_RANK=1 HEADLESS=1 $WORKER_HF_COMPOSE_ENV VLLM_HOST_IP='$WORKER_VLLM_HOST_IP' GPU_MEMORY_UTILIZATION='$GPU_MEMORY_UTILIZATION' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' DSPARK_ENABLE_ISSUE141_SPARSE_MLA_CHUNK='$DSPARK_ISSUE141_EFFECTIVE' DSPARK_ISSUE141_HOTFIX='./patches/hotfix-dsv4-issue141-sparse-mla-decode-chunk.py' ENABLE_VLLM_GB10_PATCH='$ENABLE_VLLM_GB10_PATCH' VLLM_GB10_PATCH_DIR='./vllm_patch_gb10' GB10_HYBRID_NVFP4_M_THRESHOLD='${GB10_HYBRID_NVFP4_M_THRESHOLD:-128}' DSPARK_ENABLE_ISSUE138_RESPONSES_HISTORY_COMPAT='$DSPARK_ENABLE_ISSUE138_RESPONSES_HISTORY_COMPAT' DSPARK_ISSUE138_HOTFIX='./patches/hotfix-vllm-issue138-responses-history.py' docker compose -p '$PROJECT_NAME' --env-file .env.dspark $WORKER_COMPOSE_FILES config --quiet"
+  remote_compose "NODE_RANK=1 HEADLESS=1 $WORKER_HF_COMPOSE_ENV VLLM_HOST_IP='$WORKER_VLLM_HOST_IP' GPU_MEMORY_UTILIZATION='$GPU_MEMORY_UTILIZATION' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' DSPARK_ENABLE_ISSUE141_SPARSE_MLA_CHUNK='$DSPARK_ISSUE141_EFFECTIVE' DSPARK_ISSUE141_HOTFIX='./patches/hotfix-dsv4-issue141-sparse-mla-decode-chunk.py' ENABLE_VLLM_GB10_PATCH='$ENABLE_VLLM_GB10_PATCH' VLLM_GB10_PATCH_DIR='./vllm_patch_gb10' GB10_HYBRID_NVFP4_M_THRESHOLD='${GB10_HYBRID_NVFP4_M_THRESHOLD:-128}' DSPARK_ENABLE_ISSUE138_RESPONSES_HISTORY_COMPAT='$DSPARK_ENABLE_ISSUE138_RESPONSES_HISTORY_COMPAT' DSPARK_ISSUE138_HOTFIX='./patches/hotfix-vllm-issue138-responses-history.py' DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT='$DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT' DSPARK_CODEX_AGENT_MESSAGE_HOTFIX='./patches/hotfix-vllm-codex-agent-message.py' docker compose -p '$PROJECT_NAME' --env-file .env.dspark $WORKER_COMPOSE_FILES config --quiet"
+  if [ "$DSPARK_TP3" = "1" ]; then
+    echo "Validating worker2 compose config..."
+    remote_compose2 "NODE_RANK=2 HEADLESS=1 $WORKER2_HF_COMPOSE_ENV VLLM_HOST_IP='$WORKER2_VLLM_HOST_IP' GPU_MEMORY_UTILIZATION='$GPU_MEMORY_UTILIZATION' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' DSPARK_ENABLE_ISSUE141_SPARSE_MLA_CHUNK='$DSPARK_ISSUE141_EFFECTIVE' DSPARK_ISSUE141_HOTFIX='./patches/hotfix-dsv4-issue141-sparse-mla-decode-chunk.py' ENABLE_VLLM_GB10_PATCH='$ENABLE_VLLM_GB10_PATCH' VLLM_GB10_PATCH_DIR='./vllm_patch_gb10' GB10_HYBRID_NVFP4_M_THRESHOLD='${GB10_HYBRID_NVFP4_M_THRESHOLD:-128}' DSPARK_ENABLE_ISSUE138_RESPONSES_HISTORY_COMPAT='$DSPARK_ENABLE_ISSUE138_RESPONSES_HISTORY_COMPAT' DSPARK_ISSUE138_HOTFIX='./patches/hotfix-vllm-issue138-responses-history.py' DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT='$DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT' DSPARK_CODEX_AGENT_MESSAGE_HOTFIX='./patches/hotfix-vllm-codex-agent-message.py' docker compose -p '$PROJECT_NAME' --env-file .env.dspark $WORKER2_COMPOSE_FILES config --quiet"
+  fi
 }
 
 need_cmd docker
@@ -970,6 +1122,18 @@ ssh "$WORKER_HOST" "docker image inspect '$DSPARK_VLLM_IMAGE' >/dev/null" || {
   exit 1
 }
 
+if [ "$DSPARK_TP3" = "1" ]; then
+  ssh -o BatchMode=yes -o ConnectTimeout=10 "$WORKER2_HOST" "true" >/dev/null || {
+    echo "Cannot reach worker2 with passwordless SSH: $WORKER2_HOST" >&2
+    exit 1
+  }
+  ssh "$WORKER2_HOST" "docker image inspect '$DSPARK_VLLM_IMAGE' >/dev/null" || {
+    echo "Missing worker2 Docker image $DSPARK_VLLM_IMAGE." >&2
+    echo "Pull it on worker2 (e.g. docker pull $DSPARK_VLLM_IMAGE)." >&2
+    exit 1
+  }
+fi
+
 already_running_hint() {
   echo "This is not a failed start: dockerd likely restored ranks after a reboot (compose restart: unless-stopped). The cluster may already be serving. Run ./stop-deepseek-v4-flash-dspark.sh only if you want a cold start. Supervisors: treat exit 3 as already-up (systemd SuccessExitStatus=3)." >&2
 }
@@ -993,8 +1157,54 @@ else
   exit "$worker_rc"
 fi
 
+if [ "$DSPARK_TP3" = "1" ]; then
+  if ssh "$WORKER2_HOST" "if docker ps --format '{{.Names}}' | grep -qx '${PROJECT_NAME}-vllm-dspark-1'; then echo 'DSpark worker2 container already exists for project $PROJECT_NAME. Stop it first.' >&2; exit 1; fi"; then
+    :
+  else
+    worker_rc=$?
+    echo "Cannot start: worker2 check on $WORKER2_HOST failed (ssh exit $worker_rc)." >&2
+    exit "$worker_rc"
+  fi
+fi
+
+# Pairwise CX /24s are fine for RoCE but not for Gloo/NCCL TCP bootstrap.
+# Rank 2 will try the head's CX IP (e.g. 10.0.22.1) and time out. After GID
+# resolve (which must still match the RoCE iface), move bootstrap to the
+# 10.0.0.x loopback aliases already used as MASTER_ADDR / VLLM_HOST_IP.
+apply_tp3_bootstrap_ifaces() {
+  [ "$DSPARK_TP3" = "1" ] || return 0
+  # lo has 127.0.0.1 plus 10.0.0.x; Gloo binds 127.0.0.1 and the mesh dies.
+  # On this DGX Spark ring the RJ45 NIC is named enP7s7 on every node and
+  # shares 192.168.1.0/24 — the only L3 that reaches all three ranks.
+  local bif="${TP3_BOOTSTRAP_IFNAME:-enP7s7}"
+  echo "TP=3 bootstrap: Gloo/NCCL-socket/TP TCP on ${bif} (LAN all-to-all). NCCL_IB_HCA stays on ConnectX."
+  GLOO_SOCKET_IFNAME="$bif"
+  TP_SOCKET_IFNAME="$bif"
+  NCCL_SOCKET_IFNAME="$bif"
+  WORKER_GLOO_SOCKET_IFNAME="$bif"
+  WORKER_TP_SOCKET_IFNAME="$bif"
+  WORKER_NCCL_SOCKET_IFNAME="$bif"
+  WORKER2_GLOO_SOCKET_IFNAME="$bif"
+  WORKER2_TP_SOCKET_IFNAME="$bif"
+  WORKER2_NCCL_SOCKET_IFNAME="$bif"
+  # Pairwise CX /24s: a single HCA makes spark1 try 10.0.22.1 → 10.0.23.3 (RTR timeout).
+  local hcas="${TP3_NCCL_IB_HCA:-rocep1s0f0,rocep1s0f1}"
+  echo "TP=3 RoCE: NCCL_IB_HCA=${hcas} (both CX ports; GID index already resolved)."
+  NCCL_IB_HCA="$hcas"
+  WORKER_NCCL_IB_HCA="$hcas"
+  WORKER2_NCCL_IB_HCA="$hcas"
+  # Dual-port CX: each port is a different /24 to a different neighbor.
+  # MERGE_NICS=1 bonds them and QPs the wrong peer; default prefix /16 treats
+  # 10.0.22 and 10.0.23 as one subnet. Spark-ring recipe: MERGE=0 + subnet /24.
+  NCCL_IB_MERGE_NICS=0
+  NCCL_IB_SUBNET_AWARE_ROUTING=1
+  NCCL_IB_SUBNET_PREFIX_LEN=24
+  echo "TP=3 RoCE: NCCL_IB_MERGE_NICS=0 NCCL_IB_SUBNET_AWARE_ROUTING=1 NCCL_IB_SUBNET_PREFIX_LEN=24"
+}
+
 cd "$SCRIPT_DIR"
 resolve_nccl_gid_indexes
+apply_tp3_bootstrap_ifaces
 STARTUP_LOG_SINCE="$(log_since)"
 trap on_error ERR
 print_resolved_profile
@@ -1037,6 +1247,11 @@ if [ -f "$DSPARK_SPIN_WAIT_HOTFIX" ]; then
   ssh "$WORKER_HOST" "mkdir -p '${REMOTE_WORKER_DIR}/patches'"
   scp "$DSPARK_SPIN_WAIT_HOTFIX" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/patches/hotfix-gb10-spin-wait.sh"
 fi
+if [ -f "$DSPARK_ISSUE117_HOTFIX" ] && [ ! -L "$DSPARK_ISSUE117_HOTFIX" ]; then
+  echo "Syncing Issue #117 SHM ring hotfix to ${WORKER_HOST}:${WORKER_DIR}/patches/"
+  ssh "$WORKER_HOST" "mkdir -p '${REMOTE_WORKER_DIR}/patches'"
+  scp "$DSPARK_ISSUE117_HOTFIX" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/patches/hotfix-vllm-issue117-shm-ring-buffer.py"
+fi
 # DSV4 v0.27 .sh hotfixes — entrypoint applies them before exec vllm (issue #38).
 for _hf_sync in hotfix-dsv4-mtp-buffer-50312.sh hotfix-dsv4-skip-topk-49486.sh hotfix-dsv4-dense-prefill-indexer-48407.sh hotfix-dsv4-skip-empty-c128-48957.sh hotfix-dsv4-flashmla-workspace-50298.sh hotfix-dsv4-grammar-advance.sh hotfix-vllm-redact-api-key-log.sh; do
   if [ -f "$SCRIPT_DIR/patches/$_hf_sync" ]; then
@@ -1075,6 +1290,18 @@ if [ -f "$DSPARK_ISSUE27_HOTFIX" ]; then
   ssh "$WORKER_HOST" "mkdir -p '${REMOTE_WORKER_DIR}/patches'"
   scp "$DSPARK_ISSUE27_HOTFIX" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/patches/hotfix-dsv4-issue27-partial-prefill-concurrency.py"
 fi
+DSPARK_ADAPTIVE_CHUNK_HOTFIX="${DSPARK_ADAPTIVE_CHUNK_HOTFIX:-$SCRIPT_DIR/patches/hotfix-dsv4-adaptive-prefill-chunk.py}"
+if [ -f "$DSPARK_ADAPTIVE_CHUNK_HOTFIX" ]; then
+  echo "Syncing adaptive prefill-chunk hotfix to ${WORKER_HOST}:${WORKER_DIR}/patches/"
+  ssh "$WORKER_HOST" "mkdir -p '${REMOTE_WORKER_DIR}/patches'"
+  scp "$DSPARK_ADAPTIVE_CHUNK_HOTFIX" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/patches/hotfix-dsv4-adaptive-prefill-chunk.py"
+fi
+DSPARK_REPLICATE_MARKOV_HOTFIX="${DSPARK_REPLICATE_MARKOV_HOTFIX:-$SCRIPT_DIR/patches/hotfix-dsv4-replicate-markov-head.py}"
+if [ -f "$DSPARK_REPLICATE_MARKOV_HOTFIX" ]; then
+  echo "Syncing replicate-Markov-head hotfix to ${WORKER_HOST}:${WORKER_DIR}/patches/"
+  ssh "$WORKER_HOST" "mkdir -p '${REMOTE_WORKER_DIR}/patches'"
+  scp "$DSPARK_REPLICATE_MARKOV_HOTFIX" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/patches/hotfix-dsv4-replicate-markov-head.py"
+fi
 DSPARK_ISSUE43_HOTFIX="${DSPARK_ISSUE43_HOTFIX:-$SCRIPT_DIR/patches/hotfix-dsv4-issue43-decode-fairness-and-diag.py}"
 if [ -f "$DSPARK_ISSUE43_HOTFIX" ]; then
   echo "Syncing Issue #43 decode-fairness hotfix to ${WORKER_HOST}:${WORKER_DIR}/patches/"
@@ -1097,6 +1324,16 @@ if [ -f "$DSPARK_ISSUE141_HOTFIX" ]; then
   echo "Syncing Issue #141 sparse-MLA decode workaround to ${WORKER_HOST}:${WORKER_DIR}/patches/"
   ssh "$WORKER_HOST" "mkdir -p '${REMOTE_WORKER_DIR}/patches'"
   scp "$DSPARK_ISSUE141_HOTFIX" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/patches/hotfix-dsv4-issue141-sparse-mla-decode-chunk.py"
+fi
+if [ -f "$DSPARK_SP_INDEXER_HOTFIX" ]; then
+  echo "Syncing SP indexer prefill hotfix (item 6) to ${WORKER_HOST}:${WORKER_DIR}/patches/"
+  ssh "$WORKER_HOST" "mkdir -p '${REMOTE_WORKER_DIR}/patches'"
+  scp "$DSPARK_SP_INDEXER_HOTFIX" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/patches/hotfix-dsv4-sp-indexer-prefill.py"
+fi
+if [ -f "$DSPARK_DEEPGEMM_ALIAS_HOTFIX" ]; then
+  echo "Syncing DeepGEMM sm121 header alias hotfix to ${WORKER_HOST}:${WORKER_DIR}/patches/"
+  ssh "$WORKER_HOST" "mkdir -p '${REMOTE_WORKER_DIR}/patches'"
+  scp "$DSPARK_DEEPGEMM_ALIAS_HOTFIX" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/patches/hotfix-deepgemm-sm121-mqa-header-alias.sh"
 fi
 DSPARK_SUPPRESS_STOPS_HOTFIX="${DSPARK_SUPPRESS_STOPS_HOTFIX:-$SCRIPT_DIR/patches/hotfix-dsv4-suppress-stops-in-reasoning.py}"
 if [ -f "$DSPARK_SUPPRESS_STOPS_HOTFIX" ]; then
@@ -1130,10 +1367,21 @@ if [ -f "$DSPARK_ISSUE138_HOTFIX" ]; then
   ssh "$WORKER_HOST" "mkdir -p '${REMOTE_WORKER_DIR}/patches'"
   scp "$DSPARK_ISSUE138_HOTFIX" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/patches/hotfix-vllm-issue138-responses-history.py"
 fi
+if [ -f "$DSPARK_CODEX_AGENT_MESSAGE_HOTFIX" ]; then
+  echo "Syncing Codex agent_message compatibility patcher to ${WORKER_HOST}:${WORKER_DIR}/patches/"
+  ssh "$WORKER_HOST" "mkdir -p '${REMOTE_WORKER_DIR}/patches'"
+  scp "$DSPARK_CODEX_AGENT_MESSAGE_HOTFIX" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/patches/hotfix-vllm-codex-agent-message.py"
+fi
 if [ -f "$DSPARK_ISSUE136_XGRAMMAR_HOTFIX" ] && [ ! -L "$DSPARK_ISSUE136_XGRAMMAR_HOTFIX" ]; then
   echo "Syncing Issue #136 XGrammar termination hotfix to ${WORKER_HOST}:${WORKER_DIR}/patches/"
   ssh "$WORKER_HOST" "mkdir -p '${REMOTE_WORKER_DIR}/patches'"
   scp "$DSPARK_ISSUE136_XGRAMMAR_HOTFIX" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/patches/hotfix-vllm-issue136-xgrammar-termination.py"
+fi
+# Compose always bind-mounts patches/tp3. Create it on the worker even for
+# TP=2 so Docker does not invent a root-owned empty dir (or fail the mount).
+ssh "$WORKER_HOST" "mkdir -p '${REMOTE_WORKER_DIR}/patches/tp3'"
+if [ -f "$SCRIPT_DIR/patches/tp3/apply_tp3_patch.py" ]; then
+  scp "$SCRIPT_DIR/patches/tp3/apply_tp3_patch.py" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/patches/tp3/apply_tp3_patch.py"
 fi
 if [ "$ENABLE_VLLM_GB10_PATCH" = "1" ]; then
   echo "Syncing GB10 vLLM patch to ${WORKER_HOST}:${WORKER_DIR}/vllm_patch_gb10"
@@ -1142,6 +1390,75 @@ if [ "$ENABLE_VLLM_GB10_PATCH" = "1" ]; then
     --exclude='__pycache__' \
     --exclude='*.pyc' \
     -cf - . | ssh "$WORKER_HOST" "mkdir -p $REMOTE_VLLM_GB10_PATCH_DIR && tar -C $REMOTE_VLLM_GB10_PATCH_DIR --no-overwrite-dir -xf -"
+fi
+
+sync_tp3_patch_dir() {
+  local host="$1"
+  local dest_q="$2"
+  echo "Syncing patches/tp3 to ${host} (refuse boot if this fails)"
+  ssh "$host" "mkdir -p ${dest_q}/patches/tp3" || {
+    echo "FATAL: failed to mkdir patches/tp3 on ${host}" >&2
+    exit 1
+  }
+  scp "$SCRIPT_DIR/patches/tp3/apply_tp3_patch.py" "${host}:${dest_q}/patches/tp3/apply_tp3_patch.py" || {
+    echo "FATAL: failed to sync apply_tp3_patch.py to ${host} -- refusing to boot TP=3." >&2
+    exit 1
+  }
+  if [ -f "$SCRIPT_DIR/patches/dsv4_tp_pad.py" ]; then
+    scp "$SCRIPT_DIR/patches/dsv4_tp_pad.py" "${host}:${dest_q}/patches/dsv4_tp_pad.py" || {
+      echo "FATAL: failed to sync dsv4_tp_pad.py to ${host}" >&2
+      exit 1
+    }
+  fi
+}
+
+push_compose_env_file() {
+  local host="$1"
+  local remote_env_q="$2"
+  ssh "$host" "
+    set -euo pipefail
+    _env_final=$remote_env_q
+    _env_tmp=\"\${_env_final}.tmp.\$\$\"
+    _cleanup_remote_env() { [ -z \"\$_env_tmp\" ] || rm -f -- \"\$_env_tmp\"; }
+    trap _cleanup_remote_env EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    umask 077
+    cat > \"\$_env_tmp\"
+    chmod 600 \"\$_env_tmp\"
+    mv -f -- \"\$_env_tmp\" \"\$_env_final\"
+    _env_tmp=
+    trap - EXIT HUP INT TERM
+  " < "$COMPOSE_ENV_FILE"
+}
+
+if [ "$DSPARK_TP3" = "1" ]; then
+  sync_tp3_patch_dir "$WORKER_HOST" "$REMOTE_WORKER_DIR"
+  echo "Syncing DSpark deployment files to ${WORKER2_HOST}:${WORKER2_DIR}"
+  ssh "$WORKER2_HOST" "mkdir -p $REMOTE_WORKER2_DIR $REMOTE_WORKER2_DIR/recipe/vllm/v1/spec_decode $REMOTE_WORKER2_DIR/patches"
+  scp "$COMPOSE_FILE" "${WORKER2_HOST}:${REMOTE_COMPOSE_FILE2}"
+  if [ "$DSPARK_WORKER_HF_NFS" = "1" ]; then
+    [ -f "$NFS_OVERRIDE_FILE" ] || { echo "Missing NFS compose override: $NFS_OVERRIDE_FILE" >&2; exit 1; }
+    scp "$NFS_OVERRIDE_FILE" "${WORKER2_HOST}:${REMOTE_NFS_OVERRIDE_FILE2}"
+  fi
+  push_compose_env_file "$WORKER2_HOST" "$REMOTE_ENV_FILE2"
+  scp "$DSPARK_PROPOSER_FILE" "${WORKER2_HOST}:${REMOTE_WORKER2_DIR}/recipe/vllm/v1/spec_decode/dspark_proposer.py"
+  tar -C "$SCRIPT_DIR" \
+    --exclude='patches/__pycache__' \
+    --exclude='patches/*/__pycache__' \
+    -cf - patches | ssh "$WORKER2_HOST" "tar -C $REMOTE_WORKER2_DIR --no-overwrite-dir -xf -" || {
+    echo "FATAL: failed to sync patches/ to ${WORKER2_HOST} -- refusing to boot TP=3." >&2
+    exit 1
+  }
+  if [ "$ENABLE_VLLM_GB10_PATCH" = "1" ]; then
+    tar -C "$VLLM_GB10_PATCH_DIR" \
+      --exclude='*.egg-info' \
+      --exclude='__pycache__' \
+      --exclude='*.pyc' \
+      -cf - . | ssh "$WORKER2_HOST" "mkdir -p $REMOTE_VLLM_GB10_PATCH_DIR2 && tar -C $REMOTE_VLLM_GB10_PATCH_DIR2 --no-overwrite-dir -xf -"
+  fi
+  sync_tp3_patch_dir "$WORKER2_HOST" "$REMOTE_WORKER2_DIR"
 fi
 
 if [ "$DSPARK_WORKER_HF_NFS" = "1" ]; then
@@ -1163,18 +1480,65 @@ if [ "$DSPARK_WORKER_HF_NFS" = "1" ]; then
     echo "Download weights on the head first: ./prepare-dspark-model-cache.sh --yes" >&2
     exit 1
   fi
+  if [ "$DSPARK_TP3" = "1" ]; then
+    if [ -z "$WORKER2_HF_CACHE" ] || [ "$WORKER2_HF_CACHE" = "${HF_CACHE:-}" ]; then
+      WORKER2_HF_CACHE="$(ssh "$WORKER2_HOST" 'printf %s "$HOME/.cache/huggingface"')"
+      [ -n "$WORKER2_HF_CACHE" ] || { echo "Could not resolve worker2 HOME for JIT cache overlays." >&2; exit 1; }
+      WORKER2_HF_COMPOSE_ENV="HF_CACHE='$NFS_VOLUME' DSPARK_JIT_CACHE='$WORKER2_HF_CACHE'"
+      echo "Worker2 JIT cache defaulted to $WORKER2_HF_CACHE"
+    fi
+    ssh "$WORKER2_HOST" "mkdir -p $(for d in $(nfs_jit_subdirs); do printf '%s/%s ' "$WORKER2_HF_CACHE" "$d"; done)"
+    # 3-node ring: worker2 is on a different CX /24 than worker1. Do not reuse
+    # NFS_SERVER_IP from NCCL_SOCKET_IFNAME (spark1↔spark2). Pick a head CX
+    # IPv4 worker2 can ping, or WORKER2_NFS_SERVER_IP.
+    WORKER2_NFS_SERVER_IP="$(nfs_pick_server_ip_for_host "$WORKER2_HOST" "${WORKER2_NFS_SERVER_IP:-}")" || {
+      echo "FATAL: no head ConnectX IPv4 is pingable from worker2 ${WORKER2_HOST}." >&2
+      echo "Set WORKER2_NFS_SERVER_IP to the spark1 address on the spark1↔spark3 link (not 10.0.22.1)." >&2
+      exit 1
+    }
+    if [ "$WORKER2_NFS_SERVER_IP" = "$NFS_SERVER_IP" ]; then
+      echo "Worker2 NFS via same head IP as worker1: $WORKER2_NFS_SERVER_IP"
+    else
+      echo "Worker2 NFS via ring peer link: $WORKER2_NFS_SERVER_IP (worker1 uses $NFS_SERVER_IP)"
+    fi
+    nfs_grant_subnet "$(nfs_subnet24 "$WORKER2_NFS_SERVER_IP")"
+    nfs_ensure_host_volume "$WORKER2_HOST" "$WORKER2_NFS_SERVER_IP"
+    if timeout 45 ssh "$WORKER2_HOST" "docker run --rm -v '${NFS_VOLUME}:/hf:ro' alpine:latest test -d '/hf/${_nfs_model_rel}'" >/dev/null 2>&1; then
+      echo "Worker2 sees $_nfs_model_rel over NFS ($NFS_VOLUME @ $WORKER2_NFS_SERVER_IP)."
+    else
+      echo "WORKER2 cannot see $_nfs_model_rel over NFS at ${WORKER2_NFS_SERVER_IP}." >&2
+      echo "Export must allow $(nfs_subnet24 "$WORKER2_NFS_SERVER_IP") (live vllm-fn-nfs clients are often only worker1's /24)." >&2
+      exit 1
+    fi
+  fi
 fi
 validate_compose
+
+if [ "${DSPARK_SKIP_ISSUE117_RECHECK_HOTFIX:-0}" != "1" ]; then
+  echo "Checking Issue #117 SHM ring compatibility on the worker before either rank starts..."
+  remote_compose "NODE_RANK=1 HEADLESS=1 $WORKER_HF_COMPOSE_ENV VLLM_HOST_IP='$WORKER_VLLM_HOST_IP' GPU_MEMORY_UTILIZATION='$GPU_MEMORY_UTILIZATION' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' ENABLE_VLLM_GB10_PATCH='$ENABLE_VLLM_GB10_PATCH' VLLM_GB10_PATCH_DIR='./vllm_patch_gb10' GB10_HYBRID_NVFP4_M_THRESHOLD='${GB10_HYBRID_NVFP4_M_THRESHOLD:-128}' docker compose -p '$PROJECT_NAME' --env-file .env.dspark $WORKER_COMPOSE_FILES run --rm --no-deps --entrypoint python3 vllm-dspark /opt/dspark-patches/hotfix-vllm-issue117-shm-ring-buffer.py --check"
+  echo "Checking Issue #117 SHM ring compatibility on the head before either rank starts..."
+  compose_base 0 "" run --rm --no-deps --entrypoint python3 vllm-dspark /opt/dspark-patches/hotfix-vllm-issue117-shm-ring-buffer.py --check
+fi
 
 if [ "${DSPARK_ENABLE_ISSUE136_XGRAMMAR_HOTFIX:-0}" = "1" ]; then
   echo "Checking Issue #136 XGrammar compatibility on the worker before either rank starts..."
   remote_compose "NODE_RANK=1 HEADLESS=1 $WORKER_HF_COMPOSE_ENV VLLM_HOST_IP='$WORKER_VLLM_HOST_IP' GPU_MEMORY_UTILIZATION='$GPU_MEMORY_UTILIZATION' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' ENABLE_VLLM_GB10_PATCH='$ENABLE_VLLM_GB10_PATCH' VLLM_GB10_PATCH_DIR='./vllm_patch_gb10' GB10_HYBRID_NVFP4_M_THRESHOLD='${GB10_HYBRID_NVFP4_M_THRESHOLD:-128}' docker compose -p '$PROJECT_NAME' --env-file .env.dspark $WORKER_COMPOSE_FILES run --rm --no-deps --entrypoint python3 vllm-dspark /opt/hotfix-vllm-issue136-xgrammar-termination.py --check"
+  if [ "$DSPARK_TP3" = "1" ]; then
+    echo "Checking Issue #136 XGrammar compatibility on worker2 before ranks start..."
+    remote_compose2 "NODE_RANK=2 HEADLESS=1 $WORKER2_HF_COMPOSE_ENV VLLM_HOST_IP='$WORKER2_VLLM_HOST_IP' GPU_MEMORY_UTILIZATION='$GPU_MEMORY_UTILIZATION' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' ENABLE_VLLM_GB10_PATCH='$ENABLE_VLLM_GB10_PATCH' VLLM_GB10_PATCH_DIR='./vllm_patch_gb10' GB10_HYBRID_NVFP4_M_THRESHOLD='${GB10_HYBRID_NVFP4_M_THRESHOLD:-128}' docker compose -p '$PROJECT_NAME' --env-file .env.dspark $WORKER2_COMPOSE_FILES run --rm --no-deps --entrypoint python3 vllm-dspark /opt/hotfix-vllm-issue136-xgrammar-termination.py --check"
+  fi
   echo "Checking Issue #136 XGrammar compatibility on the head before either rank starts..."
   compose_base 0 "" run --rm --no-deps --entrypoint python3 vllm-dspark /opt/hotfix-vllm-issue136-xgrammar-termination.py --check
 fi
 
 echo "Starting DSpark worker on ${WORKER_HOST}..."
-remote_compose "NODE_RANK=1 HEADLESS=1 $WORKER_HF_COMPOSE_ENV VLLM_HOST_IP='$WORKER_VLLM_HOST_IP' GPU_MEMORY_UTILIZATION='$GPU_MEMORY_UTILIZATION' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' DSPARK_ENABLE_ISSUE141_SPARSE_MLA_CHUNK='$DSPARK_ISSUE141_EFFECTIVE' DSPARK_ISSUE141_HOTFIX='./patches/hotfix-dsv4-issue141-sparse-mla-decode-chunk.py' ENABLE_VLLM_GB10_PATCH='$ENABLE_VLLM_GB10_PATCH' VLLM_GB10_PATCH_DIR='./vllm_patch_gb10' GB10_HYBRID_NVFP4_M_THRESHOLD='${GB10_HYBRID_NVFP4_M_THRESHOLD:-128}' DSPARK_ENABLE_ISSUE138_RESPONSES_HISTORY_COMPAT='$DSPARK_ENABLE_ISSUE138_RESPONSES_HISTORY_COMPAT' DSPARK_ISSUE138_HOTFIX='./patches/hotfix-vllm-issue138-responses-history.py' docker compose -p '$PROJECT_NAME' --env-file .env.dspark $WORKER_COMPOSE_FILES up -d"
+remote_compose "NODE_RANK=1 HEADLESS=1 $WORKER_HF_COMPOSE_ENV VLLM_HOST_IP='$WORKER_VLLM_HOST_IP' GPU_MEMORY_UTILIZATION='$GPU_MEMORY_UTILIZATION' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' DSPARK_ENABLE_ISSUE141_SPARSE_MLA_CHUNK='$DSPARK_ISSUE141_EFFECTIVE' DSPARK_ISSUE141_HOTFIX='./patches/hotfix-dsv4-issue141-sparse-mla-decode-chunk.py' DSPARK_ENABLE_SP_INDEXER='$DSPARK_SP_INDEXER_EFFECTIVE' DSPARK_SP_INDEXER_HOTFIX='./patches/hotfix-dsv4-sp-indexer-prefill.py' DSPARK_ENABLE_DEEPGEMM_SM121_ALIAS='$DSPARK_DEEPGEMM_ALIAS_EFFECTIVE' ENABLE_VLLM_GB10_PATCH='$ENABLE_VLLM_GB10_PATCH' VLLM_GB10_PATCH_DIR='./vllm_patch_gb10' GB10_HYBRID_NVFP4_M_THRESHOLD='${GB10_HYBRID_NVFP4_M_THRESHOLD:-128}' DSPARK_ENABLE_ISSUE138_RESPONSES_HISTORY_COMPAT='$DSPARK_ENABLE_ISSUE138_RESPONSES_HISTORY_COMPAT' DSPARK_ISSUE138_HOTFIX='./patches/hotfix-vllm-issue138-responses-history.py' DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT='$DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT' DSPARK_CODEX_AGENT_MESSAGE_HOTFIX='./patches/hotfix-vllm-codex-agent-message.py' docker compose -p '$PROJECT_NAME' --env-file .env.dspark $WORKER_COMPOSE_FILES up -d"
+
+if [ "$DSPARK_TP3" = "1" ]; then
+  echo "Starting DSpark worker2 on ${WORKER2_HOST}..."
+  remote_compose2 "NODE_RANK=2 HEADLESS=1 $WORKER2_HF_COMPOSE_ENV VLLM_HOST_IP='$WORKER2_VLLM_HOST_IP' GPU_MEMORY_UTILIZATION='$GPU_MEMORY_UTILIZATION' DSPARK_MODEL='$DSPARK_MODEL' DSPARK_REVISION='${DSPARK_REVISION:-}' DSPARK_ENABLE_ISSUE141_SPARSE_MLA_CHUNK='$DSPARK_ISSUE141_EFFECTIVE' DSPARK_ISSUE141_HOTFIX='./patches/hotfix-dsv4-issue141-sparse-mla-decode-chunk.py' DSPARK_ENABLE_SP_INDEXER='$DSPARK_SP_INDEXER_EFFECTIVE' DSPARK_SP_INDEXER_HOTFIX='./patches/hotfix-dsv4-sp-indexer-prefill.py' DSPARK_ENABLE_DEEPGEMM_SM121_ALIAS='$DSPARK_DEEPGEMM_ALIAS_EFFECTIVE' ENABLE_VLLM_GB10_PATCH='$ENABLE_VLLM_GB10_PATCH' VLLM_GB10_PATCH_DIR='./vllm_patch_gb10' GB10_HYBRID_NVFP4_M_THRESHOLD='${GB10_HYBRID_NVFP4_M_THRESHOLD:-128}' DSPARK_ENABLE_ISSUE138_RESPONSES_HISTORY_COMPAT='$DSPARK_ENABLE_ISSUE138_RESPONSES_HISTORY_COMPAT' DSPARK_ISSUE138_HOTFIX='./patches/hotfix-vllm-issue138-responses-history.py' DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT='$DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT' DSPARK_CODEX_AGENT_MESSAGE_HOTFIX='./patches/hotfix-vllm-codex-agent-message.py' docker compose -p '$PROJECT_NAME' --env-file .env.dspark $WORKER2_COMPOSE_FILES up -d"
+fi
 
 echo "Starting DSpark head..."
 compose_base 0 "" up -d
@@ -1188,6 +1552,9 @@ fi
 if [ "${DSPARK_SKIP_SPIN_WAIT_HOTFIX:-0}" = "1" ]; then
   echo "Entrypoint will skip GB10 shm spin-wait hotfix (DSPARK_SKIP_SPIN_WAIT_HOTFIX=1)."
 fi
+if [ "${DSPARK_SKIP_ISSUE117_RECHECK_HOTFIX:-0}" = "1" ]; then
+  echo "Entrypoint will skip Issue #117 SHM ring hotfix; the Issue #79 setting is unchanged."
+fi
 echo "Issue #22 / v0.27 .sh hotfixes run in the compose entrypoint before vllm (no mid-boot stop)."
 
 echo "Waiting for DSpark vLLM API..."
@@ -1197,17 +1564,26 @@ for _ in $(seq 1 "$WAIT_ATTEMPTS"); do
     echo "DeepSeek V4 Flash DSpark is running: $API_URL"
     compose_base 0 "" ps
     remote_compose "docker compose -p '$PROJECT_NAME' --env-file .env.dspark -f docker-compose.dspark.yml ps"
+    if [ "$DSPARK_TP3" = "1" ]; then
+      remote_compose2 "docker compose -p '$PROJECT_NAME' --env-file .env.dspark -f docker-compose.dspark.yml ps"
+    fi
+    # Probe/warmup model selection (begin).
+    # vLLM accepts one served alias per request. SERVED_MODEL_NAME may contain
+    # multiple space-separated aliases, so use the first advertised name.
+    read -r PROBE_MODEL _ <<< "${SERVED_MODEL_NAME:-deepseek-v4-flash-dspark}"
+    PROBE_MODEL="${PROBE_MODEL:-deepseek-v4-flash-dspark}"
+    # Probe/warmup model selection (end).
     if [ "${DSPARK_ENABLE_ISSUE31_GPU_HOTFIX:-0}" = "1" ]; then
       echo "Running minimal OpenAI-compatible thinking-budget chat request..."
       curl -fsS --max-time 60 "${AUTH_HEADER_ARGS[@]}" "$CHAT_URL" \
         -H "Content-Type: application/json" \
-        -d '{"model":"'"${SERVED_MODEL_NAME:-deepseek-v4-flash-dspark}"'","messages":[{"role":"user","content":"Reply with OK."}],"max_tokens":32,"temperature":0.6,"top_p":0.95,"thinking_token_budget":1,"chat_template_kwargs":{"thinking":true,"reasoning_effort":"low"}}' >/dev/null
+        -d '{"model":"'"${PROBE_MODEL}"'","messages":[{"role":"user","content":"Reply with OK."}],"max_tokens":32,"temperature":0.6,"top_p":0.95,"thinking_token_budget":1,"chat_template_kwargs":{"thinking":true,"reasoning_effort":"low"}}' >/dev/null
       echo "Minimal thinking-budget chat request succeeded."
     else
       echo "Running minimal OpenAI-compatible chat request (stock V2; no thinking_token_budget)..."
       curl -fsS --max-time 60 "${AUTH_HEADER_ARGS[@]}" "$CHAT_URL" \
         -H "Content-Type: application/json" \
-        -d '{"model":"'"${SERVED_MODEL_NAME:-deepseek-v4-flash-dspark}"'","messages":[{"role":"user","content":"Reply with OK."}],"max_tokens":32,"temperature":0.6,"top_p":0.95,"chat_template_kwargs":{"thinking":true,"reasoning_effort":"low"}}' >/dev/null
+        -d '{"model":"'"${PROBE_MODEL}"'","messages":[{"role":"user","content":"Reply with OK."}],"max_tokens":32,"temperature":0.6,"top_p":0.95,"chat_template_kwargs":{"thinking":true,"reasoning_effort":"low"}}' >/dev/null
       echo "Minimal chat request succeeded."
     fi
     # Issue #117: burn the spec-decode/prefill Triton shape buckets before real
@@ -1240,7 +1616,7 @@ for _ in $(seq 1 "$WAIT_ATTEMPTS"); do
         DSPARK_WARMUP_BEARER="$_warmup_bearer" \
         DSPARK_WARMUP_TRITON_CACHE_DIR="$_warmup_tcache_host" \
         bash "$SCRIPT_DIR/scripts/boot-shape-warmup.sh" \
-        "${CHAT_URL%/v1/chat/completions}" "${SERVED_MODEL_NAME:-deepseek-v4-flash-dspark}" || \
+        "${CHAT_URL%/v1/chat/completions}" "$PROBE_MODEL" || \
         echo "WARN: boot shape warmup incomplete — uncovered shapes may JIT mid-serve (issue #117)" >&2
     else
       echo "Boot shape warmup: SKIPPED (DSPARK_BOOT_SHAPE_WARMUP=0)"
@@ -1254,4 +1630,8 @@ echo "Timed out waiting for DSpark API. Recent head logs:" >&2
 compose_base 0 "" logs --tail=120 vllm-dspark >&2 || true
 echo "Recent worker logs:" >&2
 remote_compose "docker compose -p '$PROJECT_NAME' --env-file .env.dspark -f docker-compose.dspark.yml logs --tail=120 vllm-dspark" >&2 || true
+if [ "$DSPARK_TP3" = "1" ]; then
+  echo "Recent worker2 logs:" >&2
+  remote_compose2 "docker compose -p '$PROJECT_NAME' --env-file .env.dspark -f docker-compose.dspark.yml logs --tail=120 vllm-dspark" >&2 || true
+fi
 exit 1

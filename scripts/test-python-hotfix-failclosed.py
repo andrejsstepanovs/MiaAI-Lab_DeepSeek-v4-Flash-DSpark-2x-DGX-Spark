@@ -16,6 +16,9 @@ RUNTIME_TOKEN = "python3 /opt/hotfix-dsv4-issue27-partial-prefill-concurrency.py
 ISSUE138_TOKEN = "python3 /opt/hotfix-vllm-issue138-responses-history.py"
 LAUNCHER_BEGIN = "# Issue #138 Responses history compatibility pre-flight (begin)."
 LAUNCHER_END = "# Issue #138 Responses history compatibility pre-flight (end)."
+CODEX_AGENT_TOKEN = "python3 /opt/hotfix-vllm-codex-agent-message.py"
+CODEX_LAUNCHER_BEGIN = "# Codex agent_message compatibility pre-flight (begin)."
+CODEX_LAUNCHER_END = "# Codex agent_message compatibility pre-flight (end)."
 ISSUE136_TOKEN = "python3 /opt/hotfix-vllm-issue136-xgrammar-termination.py"
 
 PYTHON_STUB = """#!/usr/bin/env bash
@@ -52,6 +55,15 @@ def _compose_line(token: str) -> str:
     return matches[0]
 
 
+def _optional_compose_line(token: str) -> str:
+    matches = [
+        line.strip()
+        for line in COMPOSE.read_text().splitlines()
+        if token in line
+    ]
+    return matches[0] if len(matches) == 1 else ""
+
+
 class PythonHotfixFailClosedTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -62,6 +74,13 @@ class PythonHotfixFailClosedTest(unittest.TestCase):
         cls.launcher_preflight = start_source.split(LAUNCHER_BEGIN, 1)[1].split(
             LAUNCHER_END, 1
         )[0]
+        cls.codex_agent_line = _optional_compose_line(CODEX_AGENT_TOKEN)
+        if CODEX_LAUNCHER_BEGIN in start_source and CODEX_LAUNCHER_END in start_source:
+            cls.codex_launcher_preflight = start_source.split(
+                CODEX_LAUNCHER_BEGIN, 1
+            )[1].split(CODEX_LAUNCHER_END, 1)[0]
+        else:
+            cls.codex_launcher_preflight = ""
         cls.issue136_line = _compose_line(ISSUE136_TOKEN)
 
     def _run_line(
@@ -69,7 +88,7 @@ class PythonHotfixFailClosedTest(unittest.TestCase):
         line: str,
         *,
         fail_step: str | None = None,
-        env_extra: dict[str, str] | None = None,
+        env_extra: dict[str, str | None] | None = None,
         missing_encoding: bool = False,
     ) -> tuple[subprocess.CompletedProcess[str], list[str], bool]:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -99,10 +118,16 @@ class PythonHotfixFailClosedTest(unittest.TestCase):
                     "DSPARK_ENABLE_ISSUE31_GPU_HOTFIX": "0",
                     "DSPARK_ENABLE_ISSUE136_XGRAMMAR_HOTFIX": "0",
                     "DSPARK_SKIP_SUPPRESS_STOPS_HOTFIX": "0",
+                    # Opt-in (compose default 0); the chain tests model them
+                    # enabled so their fail-closed behaviour is covered.
+                    "DSPARK_ENABLE_ADAPTIVE_CHUNK": "1",
+                    "DSPARK_ENABLE_REPLICATE_MARKOV": "1",
                 }
             )
             env.pop("DSPARK_ENABLE_ISSUE138_RESPONSES_HISTORY_COMPAT", None)
             env.pop("DSPARK_ISSUE138_HOTFIX", None)
+            env.pop("DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT", None)
+            env.pop("DSPARK_CODEX_AGENT_MESSAGE_HOTFIX", None)
             env.pop("DSPARK_ENABLE_ISSUE141_SPARSE_MLA_CHUNK", None)
             if fail_step is not None:
                 env["FAIL_STEP"] = fail_step
@@ -111,7 +136,11 @@ class PythonHotfixFailClosedTest(unittest.TestCase):
                 env.pop("FAIL_STEP", None)
                 env.pop("FAIL_CODE", None)
             if env_extra:
-                env.update(env_extra)
+                for key, value in env_extra.items():
+                    if value is None:
+                        env.pop(key, None)
+                    else:
+                        env[key] = value
 
             proc = subprocess.run(
                 ["bash", "-c", command],
@@ -225,6 +254,8 @@ class PythonHotfixFailClosedTest(unittest.TestCase):
                 "hotfix-dsv4-vision-exp.py",
                 "hotfix-vllm-empty-encoder-output.py",
                 "hotfix-dsv4-issue27-partial-prefill-concurrency.py",
+                "hotfix-dsv4-adaptive-prefill-chunk.py",
+                "hotfix-dsv4-replicate-markov-head.py",
                 "hotfix-dsv4-issue43-decode-fairness-and-diag.py",
                 "hotfix-dsv4-issue26-hybrid-swa-min.py",
                 "hotfix-dsv4-issue133-triton-specialization.py",
@@ -242,6 +273,105 @@ class PythonHotfixFailClosedTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
         self.assertEqual(invocations, ["hotfix-vllm-issue138-responses-history.py"])
         self.assertFalse(reached)
+
+    def test_codex_agent_message_unset_zero_and_non_one_do_not_invoke_patcher(self):
+        self.assertTrue(self.codex_agent_line, "Codex agent_message gate is missing")
+        for value in (None, "0", "true", "2"):
+            with self.subTest(value=value):
+                extra = (
+                    {}
+                    if value is None
+                    else {"DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT": value}
+                )
+                proc, invocations, reached = self._run_line(
+                    self.codex_agent_line, env_extra=extra
+                )
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                self.assertEqual(invocations, [])
+                self.assertTrue(reached)
+
+    def test_issue138_and_codex_agent_message_run_in_compatible_order(self):
+        self.assertTrue(self.codex_agent_line, "Codex agent_message gate is missing")
+        proc, invocations, reached = self._run_line(
+            self.issue138_line + "\n" + self.codex_agent_line,
+            env_extra={
+                "DSPARK_ENABLE_ISSUE138_RESPONSES_HISTORY_COMPAT": "1",
+                "DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT": "1",
+            },
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(
+            invocations,
+            [
+                "hotfix-vllm-issue138-responses-history.py",
+                "hotfix-vllm-codex-agent-message.py",
+            ],
+        )
+        self.assertTrue(reached)
+
+    def test_codex_agent_message_failure_blocks_service_exec(self):
+        self.assertTrue(self.codex_agent_line, "Codex agent_message gate is missing")
+        proc, invocations, reached = self._run_line(
+            self.codex_agent_line,
+            fail_step="hotfix-vllm-codex-agent-message.py",
+            env_extra={"DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT": "1"},
+        )
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertEqual(invocations, ["hotfix-vllm-codex-agent-message.py"])
+        self.assertFalse(reached)
+
+    def test_codex_launcher_enabled_missing_source_exits_before_side_effect(self):
+        self.assertTrue(
+            self.codex_launcher_preflight,
+            "Codex agent_message launcher pre-flight is missing",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            reached = root / "side-effect"
+            command = self.codex_launcher_preflight + f"\nprintf reached > '{reached}'\n"
+            proc = subprocess.run(
+                ["bash", "-c", command],
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "SCRIPT_DIR": str(root),
+                    "DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT": "1",
+                    "DSPARK_CODEX_AGENT_MESSAGE_HOTFIX": "missing.py",
+                },
+                timeout=30,
+            )
+            self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+            self.assertIn("patcher is missing", proc.stderr)
+            self.assertFalse(reached.exists())
+
+    def test_codex_launcher_normalizes_flag_and_resolves_relative_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            patcher = root / "selected.py"
+            patcher.write_text("# fixture\n")
+            result = root / "result"
+            command = (
+                self.codex_launcher_preflight
+                + "\nprintf '%s\\n%s\\n' "
+                + '"$DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT" '
+                + '"$DSPARK_CODEX_AGENT_MESSAGE_HOTFIX"'
+                + f" > '{result}'\n"
+            )
+            proc = subprocess.run(
+                ["bash", "-c", command],
+                capture_output=True,
+                text=True,
+                env={
+                    **os.environ,
+                    "SCRIPT_DIR": str(root),
+                    "DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT": "true",
+                    "DSPARK_CODEX_AGENT_MESSAGE_HOTFIX": "selected.py",
+                },
+                timeout=30,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertEqual(result.read_text().splitlines(), ["0", str(patcher)])
 
     def test_launcher_enabled_missing_source_exits_before_side_effect(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -303,11 +433,27 @@ class PythonHotfixFailClosedTest(unittest.TestCase):
             "DSPARK_ISSUE138_HOTFIX='./patches/"
             "hotfix-vllm-issue138-responses-history.py'"
         )
-        self.assertEqual(source.count(worker_env), 2)
+        self.assertEqual(source.count(worker_env), 4)
         self.assertIn(
             'scp "$DSPARK_ISSUE138_HOTFIX" "${WORKER_HOST}:'
             '${REMOTE_WORKER_DIR}/patches/'
             'hotfix-vllm-issue138-responses-history.py"',
+            source,
+        )
+        codex_worker_env = (
+            "DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT="
+            "'$DSPARK_ENABLE_CODEX_AGENT_MESSAGE_COMPAT' "
+            "DSPARK_CODEX_AGENT_MESSAGE_HOTFIX='./patches/"
+            "hotfix-vllm-codex-agent-message.py'"
+        )
+        self.assertEqual(source.count(codex_worker_env), 4)
+        self.assertIn(
+            'scp "$DSPARK_CODEX_AGENT_MESSAGE_HOTFIX" "${WORKER_HOST}:'
+            '${REMOTE_WORKER_DIR}/patches/hotfix-vllm-codex-agent-message.py"',
+            source,
+        )
+        self.assertIn(
+            "NODE_RANK=2 HEADLESS=1 $WORKER2_HF_COMPOSE_ENV",
             source,
         )
 
@@ -320,6 +466,8 @@ class PythonHotfixFailClosedTest(unittest.TestCase):
                 "hotfix-dsv4-vision-exp.py",
                 "hotfix-vllm-empty-encoder-output.py",
                 "hotfix-dsv4-issue27-partial-prefill-concurrency.py",
+                "hotfix-dsv4-adaptive-prefill-chunk.py",
+                "hotfix-dsv4-replicate-markov-head.py",
                 "hotfix-dsv4-issue43-decode-fairness-and-diag.py",
                 "hotfix-dsv4-issue26-hybrid-swa-min.py",
                 "hotfix-dsv4-issue133-triton-specialization.py",
@@ -333,6 +481,8 @@ class PythonHotfixFailClosedTest(unittest.TestCase):
             "hotfix-dsv4-vision-exp.py",
             "hotfix-vllm-empty-encoder-output.py",
             "hotfix-dsv4-issue27-partial-prefill-concurrency.py",
+            "hotfix-dsv4-adaptive-prefill-chunk.py",
+            "hotfix-dsv4-replicate-markov-head.py",
             "hotfix-dsv4-issue43-decode-fairness-and-diag.py",
             "hotfix-dsv4-issue26-hybrid-swa-min.py",
             "hotfix-dsv4-issue133-triton-specialization.py",
@@ -353,6 +503,8 @@ class PythonHotfixFailClosedTest(unittest.TestCase):
             "hotfix-dsv4-vision-exp.py",
             "hotfix-vllm-empty-encoder-output.py",
             "hotfix-dsv4-issue27-partial-prefill-concurrency.py",
+            "hotfix-dsv4-adaptive-prefill-chunk.py",
+            "hotfix-dsv4-replicate-markov-head.py",
             "hotfix-dsv4-issue43-decode-fairness-and-diag.py",
             "hotfix-dsv4-issue26-hybrid-swa-min.py",
             "hotfix-dsv4-issue133-triton-specialization.py",
@@ -388,6 +540,8 @@ class PythonHotfixFailClosedTest(unittest.TestCase):
                 "hotfix-dsv4-issue141-sparse-mla-decode-chunk.py",
                 "hotfix-vllm-empty-encoder-output.py",
                 "hotfix-dsv4-issue27-partial-prefill-concurrency.py",
+                "hotfix-dsv4-adaptive-prefill-chunk.py",
+                "hotfix-dsv4-replicate-markov-head.py",
                 "hotfix-dsv4-issue43-decode-fairness-and-diag.py",
                 "hotfix-dsv4-issue26-hybrid-swa-min.py",
                 "hotfix-dsv4-issue133-triton-specialization.py",
@@ -412,6 +566,31 @@ class PythonHotfixFailClosedTest(unittest.TestCase):
         )
         self.assertFalse(reached)
 
+    def test_easy_knobs_default_off_skip_adaptive_and_markov_patchers(self):
+        for adaptive, markov in ((None, None), ("0", "0"), ("2", "true")):
+            with self.subTest(adaptive=adaptive, markov=markov):
+                proc, invocations, reached = self._run_line(
+                    self.runtime_line,
+                    env_extra={
+                        "DSPARK_ENABLE_ADAPTIVE_CHUNK": adaptive,
+                        "DSPARK_ENABLE_REPLICATE_MARKOV": markov,
+                    },
+                )
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                self.assertEqual(
+                    invocations,
+                    [
+                        "hotfix-dsv4-vision-exp.py",
+                        "hotfix-vllm-empty-encoder-output.py",
+                        "hotfix-dsv4-issue27-partial-prefill-concurrency.py",
+                        "hotfix-dsv4-issue43-decode-fairness-and-diag.py",
+                        "hotfix-dsv4-issue26-hybrid-swa-min.py",
+                        "hotfix-dsv4-issue133-triton-specialization.py",
+                        "hotfix-dsv4-suppress-stops-in-reasoning.py",
+                    ],
+                )
+                self.assertTrue(reached)
+
     def test_suppress_stops_skip_switch_keeps_other_patchers_fail_closed(self):
         proc, invocations, reached = self._run_line(
             self.runtime_line,
@@ -424,6 +603,8 @@ class PythonHotfixFailClosedTest(unittest.TestCase):
                 "hotfix-dsv4-vision-exp.py",
                 "hotfix-vllm-empty-encoder-output.py",
                 "hotfix-dsv4-issue27-partial-prefill-concurrency.py",
+                "hotfix-dsv4-adaptive-prefill-chunk.py",
+                "hotfix-dsv4-replicate-markov-head.py",
                 "hotfix-dsv4-issue43-decode-fairness-and-diag.py",
                 "hotfix-dsv4-issue26-hybrid-swa-min.py",
                 "hotfix-dsv4-issue133-triton-specialization.py",
