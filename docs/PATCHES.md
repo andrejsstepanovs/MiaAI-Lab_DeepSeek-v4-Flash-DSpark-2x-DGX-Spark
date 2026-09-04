@@ -594,7 +594,7 @@ python3 scripts/test-issue141-sparse-mla-decode-chunk.py
 
 ---
 
-## Issue #136 — XGrammar accepts speculative tokens after termination
+## Issues #136 + #210 — XGrammar termination and post-reasoning FSM chain
 
 ### Symptom and source fix
 
@@ -619,23 +619,59 @@ the grammar state machine.
   and returns no speculative drafts after cached termination;
 - `reset` clears the matcher, counter, and cached termination flag.
 
-This is disjoint from the existing #44993 grammar-advance backport:
-`hotfix-dsv4-grammar-advance.sh` changes only
-`v1/structured_output/__init__.py` and `v1/core/sched/scheduler.py`; issue #136
-changes only `v1/structured_output/backend_xgrammar.py`.
+The same flag then applies the single-hunk vLLM PR
+[#53046](https://github.com/vllm-project/vllm/pull/53046) (issue #210) to
+`v1/structured_output/__init__.py`: in `grammar_bitmask`'s speculative window,
+a draft after the reasoning-end marker is checked with `validate_tokens`
+before `accept_tokens`, so a grammar-invalid draft that predates the bitmask
+is skipped instead of tripping the spurious `Failed to advance FSM` error
+path. No output corruption was demonstrated for the prior code, but the FSM
+state path is correctness-sensitive; the upstream fix removes the desync risk
+class. The reporter measured their best tool-evaluation result on this recipe
+with both backports active.
+
+One flag, one transaction: both candidates are built and compiled before
+either file is written; publication is per-file atomic in chain order
+(backend first), and a second-file failure rolls the first file back to its
+exact original bytes (refusing to clobber a concurrent change). A pre-chain
+#136-only state (backend patched, manager stock) is completed by publishing
+the manager file only; the inverse mix is refused as invalid.
+
+Relationship to the #44993 grammar-advance train: both patchers now touch
+`v1/structured_output/__init__.py`, on non-overlapping regions (proven
+byte-exact in both application orders by the test suite). Compose order is
+fixed — the default train runs first — so the chain normally sees the
+post-#44993 file; with `DSPARK_SKIP_HOTFIX=1` it sees the pristine pinned
+image. The patcher pins BOTH stock identities (post-#44993 and pristine) with
+their respective post-images; neither is a prerequisite of the other.
 
 ### Compatibility and exact identities
 
 Enabled mode accepts only all of the following:
 
-- image `ghcr.io/anemll/dspark-vllm-gx10:0.1.1@sha256:a83948492cf13df455170fb42885f5ef4db54fefe0feff0f841ecbff464ac9d8`;
+- image `ghcr.io/anemll/dspark-vllm-gx10:0.1.1@sha256:a83948492cf13df455170fb42885f5ef4db54fefe0feff0f841ecbff464ac9d8`
+  — the registry manifest digest (the repo's pin). It resolves directly (no
+  index layer) to config/image ID `sha256:3430d6614a8e2925f34d059af6caf05aff42387326db4d05639a60f10f2654d8`
+  on a pulled host (`docker image inspect .Id`); both names refer to the same
+  image, and the pristine manager fixture was extracted from a fresh
+  `docker create` of it.
 - installed metadata `vllm==0.25.2.dev0+g752a3a504.d20260714` and
   `xgrammar==0.2.3`;
 - stock target SHA-256
   `231f6b9d7dab5e8d68aba486fa5912db99f8bdd3f9d8842ee3e0bb12bdb7cb67`
   (12,699 bytes), or exact post-image SHA-256
   `6c7e23c0ae5c6836d0d56862c6e825c49727fa2409b881b44ea2526f1fd03f04`
-  (12,983 bytes).
+  (12,983 bytes);
+- manager target `v1/structured_output/__init__.py`, two legitimate stock
+  identities with their post-images: post-#44993
+  `e782163b8a83d58e61a655df042d3126cde8c913a2eeaf9d4a061148cd8e5c77`
+  (21,979 bytes) →
+  `3dff0e1e35f04f35e8c50c17d9efa65cd5fc8db1f25d4eb5d536b6e61114a616`
+  (22,271 bytes), or pristine
+  `fd23813a4e0d8cdc93fa1e6687e5a4f4e514b0ae37dec707d50d840771390818`
+  (22,076 bytes) →
+  `53186ccf86e3d620a9aa91af8c541516f0b45a3f640d937607a252bc42f376e6`
+  (22,368 bytes).
 
 Anything else—including another vLLM/xgrammar version, a symlink, partial
 application, or drift before/inside/after the method region—is incompatible.
@@ -664,7 +700,7 @@ docker compose --env-file .env.dspark -f docker-compose.dspark.yml run \
   /opt/hotfix-vllm-issue136-xgrammar-termination.py --check
 ```
 
-Running-container status (`patched` exits 0, `stock-compatible` exits 1,
+Running-container status (`patched` exits 0, `stock` or `partial-invalid` exits 1,
 `incompatible` exits 2):
 
 ```bash
@@ -717,6 +753,117 @@ flag, fixtures/tests, sync/preflight, and documentation together.
 
 Evidence currently checked in is CPU/source-exact only. Do not claim the live
 incident closed until the two-rank canary and log/health gate above pass.
+
+---
+
+## Issue #191 — fail-closed named/required `tool_choice` contract (default OFF)
+
+**Symptom.** With Vision-Exp (`n_predict=3`, `MTP_NUM_TOKENS=6`), async
+scheduling and TP=2, the shipped 145-case `scripts/verify-issue136-xgrammar-live.py`
+gate scored `142/145` twice at concurrency 4: HTTP 200 responses with zero
+`tool_calls` (named and `required` lanes) or arguments that violate the
+`strict` schema. Failing labels changed between runs and every failed case
+replayed `18/18` clean, so this is a concurrency-dependent engine race, not a
+prompt problem. See MIA issue #191.
+
+**Where the contract leaks.** `_create_chat_completion` returns
+`chat_completion_full_generator(...)` directly; that path serialises
+`tool_calls or []` for named/required choices with no terminal check.
+
+**What the engine actually does (measured 2026-09-03, async on and off).**
+The DeepSeek-V4 named/required structural tag is a strict *sequence*
+(`\n\n<｜DSML｜tool_calls>\n` … `</｜DSML｜tool_calls>`, `deepseek_xml` schema
+style) and XGrammar 0.2.3 enforces `required`, property order and
+`additionalProperties` on it (verified on CPU with the model tokenizer). The
+scheduler never logged `Unexpected: grammar rejected tokens`; every
+`Failed to advance FSM` line came from the *tolerated* branch of
+`StructuredOutputManager.grammar_bitmask` — drafts proposed after a mid-window
+`</think>` are checked against the fresh grammar and rejected (they predate the
+mask), which is expected and harmless but logged at ERROR. With
+`chat_template_kwargs.thinking=false` the same 145-case gate produces zero such
+lines. The real residual failure is reasoning length: see hunk 3 above. The
+`-1` placeholder / single-slot draft hand-off of async scheduling (vLLM #49694 /
+#54437) remains a code-level fail-open hazard, but it was not the observed cause
+(same violation rate with `DSPARK_ASYNC_SCHEDULING=0`).
+
+**What the patcher does.** `patches/hotfix-vllm-issue191-toolcall-failclosed.py`
+(source-exact, post-issue55 identity `08ddb5f3…`, patched identity `873ac9c6…`)
+adds two hunks to `entrypoints/openai/chat_completion/serving.py`:
+
+1. helper block after `_dsml_issue55_json_ok`: `_issue191_tool_contract_violation(request, response)`
+   returns `None` or a short reason (`tool-call-cardinality:N`, `tool-call-name`,
+   `tool-arguments-json`, `tool-arguments-type`, `tool-arguments-schema:<path>:<keyword>`,
+   `tool-call-truncated`, `no-choices`). Schema checks use the image's
+   `jsonschema` (4.26.0) and fall back to a required/type/additionalProperties
+   checker; a malformed schema never fails the request.
+2. tail of `_create_chat_completion`: on a violation log one WARNING
+   `[issue191-toolcall] contract violation request=… attempt=… mode=… reason=…`,
+   then (mode `failclosed`) regenerate the same engine input with a fresh engine
+   request id (`<id>-issue191r<n>`, client-visible id unchanged) up to
+   `DSPARK_ISSUE191_TOOLCALL_RETRIES` times and finally answer HTTP 500; mode
+   `log` returns the response unchanged. Beam search is never retried; a
+   `length` finish counts as a violation only when it left no tool call. Streaming is out of scope (chunks are already sent).
+3. **thinking-off fallback on the last retry** (`DSPARK_ISSUE191_TOOLCALL_THINKOFF_FALLBACK`,
+   default `1`). The 2026-09-03 measurement found the residual violations are
+   not grammar desync at all: with `thinking=true, reasoning_effort=low` a
+   fraction of strict requests reason for 300–500 tokens (non-deterministic
+   across batches even at temperature 0), so `max_tokens=512` cuts the reply
+   before or inside the DSML call (`finish_reason=length`, zero or a salvaged
+   partial call). Replaying the identical engine input mostly replays the
+   problem. The last `failclosed` attempt therefore swaps the prompt's trailing
+   `<think>` marker (id taken from the request's reasoning parser) for
+   `</think>` — byte-identical to rendering the chat with `thinking=false` —
+   passes `reasoning_ended=True` and thinking-off `chat_template_kwargs` to the
+   engine, and parses the reply with a thinking-off parser. The grammar then
+   constrains the reply from its first token and the call fits the client's
+   budget. The fallback only fires when the prompt ends with `<think>` (otherwise
+   the retry is identical); the log line `[issue191-toolcall] regenerating … fallback=thinkoff`
+   marks it. `0` keeps every retry identical.
+
+**Gates.** Default `0` changes no bytes. `1` requires the exact pinned identity
+on both ranks (`--check` preflight worker then head, apply at container start,
+post-apply digest verification, atomic same-directory replace). CPU suite:
+`python3 scripts/test-issue191-toolcall-failclosed.py`. Live acceptance: the
+145-case gate must reach `145/145` with the hotfix on, and the WARNING count
+in `docker logs` is the measured raw violation rate.
+
+**Companion knob.** `DSPARK_ASYNC_SCHEDULING=0` removes `--async-scheduling` on
+both ranks so the grammar bitmask rows are built from real draft tokens; it is
+the single-variable A/B for the engine-side trigger and costs decode throughput.
+## DSpark block-k unlock — `num_speculative_tokens` follows `dspark_block_size` (default OFF)
+
+**Symptom.** Vision-Exp ships `num_nextn_predict_layers=3` and
+`dspark_block_size=5`. The pinned `SpeculativeConfig.__post_init__` maps
+`num_nextn_predict_layers` to `n_predict` and rejects any
+`num_speculative_tokens > n_predict` that is not a multiple of it ("Ensure
+divisibility for MTP module reuse"), so the recipe runs k=6 (0731 has one stage
+and boots k=5). The launcher mirrors that rule. Measured against 0731 on the
+same `bench_quick` (2×GB10, TP=2): prefill identical, single-stream decode
+−15–20 % (greedy) and −20–30 % (temp 0.6); per-position draft acceptance
+0.89/0.73/0.49/0.34/0.23/0.15 at k=6 versus 0731's 0.93/0.75/0.66/0.58/0.47 at k=5.
+
+**Why the rule does not apply.** The DSpark drafter (`models/deepseek_v4/nvidia/dspark.py`,
+`v1/worker/gpu/spec_decode/dspark/speculator.py`) *stacks* the `mtp.{0,1,2}`
+stages into one non-causal backbone and predicts every position of the block in
+one parallel pass (anchor + k−1 noise queries), then samples left-to-right with
+the Markov head; no stage is re-run per step. The checkpoint's own
+`inference/model.py::DSparkBlock` drafts exactly `dspark_block_size` tokens, so
+k=5 is the trained shape.
+
+**What the patcher does.** `patches/hotfix-vllm-dspark-block-k.py`
+(source-exact, stock identity `3f1abd1c…`, patched identity `7fffe035…`) adds
+`self.method != "dspark"` to that single condition in `config/speculative.py`
+and nothing else. `DSPARK_ENABLE_DSPARK_BLOCK_K=1` gates it (mount, `--check`
+preflight worker then head, apply at container start, atomic replace) and
+relaxes the launcher's `MTP_NUM_TOKENS` rule to `>= 1`; the CPU suite is
+`python3 scripts/test-dspark-block-k.py`. Pair it with `MTP_NUM_TOKENS=5`.
+Capture size follows (`MAX_NUM_SEQS * (k + 1)` rounded up to 8 → 40 at 6×5).
+
+**Measured (2026-09-03, Vision-Exp, k=5 vs k=6, same machine):** greedy 8K
+decode 56.6 vs 55.3 tok/s, greedy 32K 56.6 vs 53.6, temp 0.6 49.9–56.9 vs
+48.6–53.1, single-stream mini-bench 56–64 vs 51–55, concurrency-4 aggregate
+unchanged (110 vs 106–111), TTFT unchanged. Per-position acceptance is the same
+at either k (0.88/0.74/0.53/0.36/0.24), so the gain is the cheaper step.
 
 ---
 
