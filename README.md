@@ -274,7 +274,7 @@ generous `max_tokens` or that budget hotfix, or thinking won't end. See
 | `MAX_NUM_SEQS` | `6` | Concurrent slots. `16` only with the 200K + Stage-C path. |
 | `MAX_NUM_BATCHED_TOKENS` | `8192` | Prefill tokens per step. `16384` for big-prompt coding. |
 | `LONG_PREFILL_TOKEN_THRESHOLD` | `1024` | Issue **#27** chunk cap. `0` lets one prefill eat the whole batch (decode starves). `2048` costs ~1.5 GB of head-node host RAM on GB10 (measured 2026-09-02), keep 1024. |
-| `DSPARK_MAX_INFLIGHT_PREFILLS` | `2` | Issue **#27** in-flight partial prefills (1–3). `2` since the 2026-09-02 A/B ([docs/CLAUDE/ab-results-2026-09-03.md](docs/CLAUDE/ab-results-2026-09-03.md)): a 4 × 8K wave sees first-token spread 9.1 s vs 14.6 s and +12 % aggregate, single-stream and c=6 decode unchanged. `1` restores the strictly serialized default. |
+| `DSPARK_MAX_INFLIGHT_PREFILLS` | `1` | Issue **#27** in-flight partial prefills (1–3). Default `1` (strictly serialized): the post-#211 exact admission gate is live-qualified at 1 (decode-fairness spread 1.60–1.76×, zero preemptions, repeated fresh boots). `2`–`3` are explicit opt-ins; the 2026-09-02 A/B that favored `2` predates the r3 counting fix. |
 | `GPU_MEMORY_UTILIZATION_TEXT` | `0.835` | Main GPU util / KV pool size. Larger = bigger KV pool. |
 | `LIMIT_MM_PER_PROMPT` | `{"image":8}` | Max images per request (Vision-Exp native `image_url`). `image=8` is converted to JSON for Anemll argparse. No video. |
 | `MTP_NUM_TOKENS` | `6` | DSpark draft depth. Vision-Exp `n_predict=3` so k must be ≥ 5 and divisible by 3. Capture size = `seqs * (k+1)` padded up to a multiple of 8 (48 at 6×6). |
@@ -324,7 +324,7 @@ On the **default Anemll 1M/6** stack:
 | --- | --- |
 | One chat, any prompt length through 128K | ~62–83 decode tok/s after first token |
 | **Six short chats** (hundreds of tokens), 1M still *allowed* | **~160–190 tok/s aggregate** (~30–37 per stream) |
-| Six **cold 32K–128K** prompts at once | Prefills are chunked (issue #27), **two in flight** (`DSPARK_MAX_INFLIGHT_PREFILLS=2`), the rest queue. A 4 × 8K wave gets its first tokens at 7.4 / 9.0 / 15.7 / 16.5 s (was 4.7 / 9.4 / 14.3 / 19.3 s at `1`). ~8 tok/s decode floor while prefills run; 128K × 6 TTFT minutes |
+| Six **cold 32K–128K** prompts at once | Prefills are chunked (issue #27), **one in flight** by default, the rest queue; `DSPARK_MAX_INFLIGHT_PREFILLS=2` opts into two overlapping prefills (pre-r3 A/B: 4 × 8K first tokens at 7.4 / 9.0 / 15.7 / 16.5 s vs 4.7 / 9.4 / 14.3 / 19.3 s at `1`). ~8 tok/s decode floor while prefills run; 128K × 6 TTFT minutes |
 
 | **Three Sparks (TP=3, `./start-tp3.sh`, 16 slots)** | Decode ≈ +4–13 % per stream and **≈ 200 tok/s aggregate at 16 streams**; prefill 4–13 % slower to 64K and ≈ 22 % slower at 128K–256K (5.0 / 18.6 / 91 / 202 s TTFT at 8K / 32K / 128K / 256K vs 4.4 / 18.0 / 75 / 165 s on two nodes). See [Optional: three Sparks (TP=3)](#optional-three-sparks-tp3). |
 
@@ -592,15 +592,18 @@ is **CPU-only** (`scripts/ci-validate.sh`). Live tok/s still needs the 2× Spark
 
 ### Strict Responses API verification
 
-Stateful `previous_response_id` continuation requires starting vLLM with
-`VLLM_ENABLE_RESPONSES_API_STORE=1`. vLLM keeps the Responses API store off
-by default; when enabled, stored response state consumes memory and is retained
-until the server restarts. A continuation `response_id` 404 while the other
-gates pass indicates this configuration is off, not a verifier regression.
+Stateful `previous_response_id` continuation requires enabling the in-memory
+store and its exact-source bounded-store backport:
 
-Existing live evidence: the stock configuration passed 3/4 gates, with only
-the known configuration 404; a controlled
-`VLLM_ENABLE_RESPONSES_API_STORE=1` run passed all four gates.
+```env
+VLLM_ENABLE_RESPONSES_API_STORE=1
+DSPARK_RESPONSES_STORE_MAX_ENTRIES=256
+```
+
+Enabled startup is fail-closed on every rank; the default remains off. See
+[Bounded Responses API store](docs/PATCHES.md#bounded-responses-api-store) for
+cap, LRU, failure, and restart semantics. The verifier treats a continuation
+404 as configuration failure, not a stateless pass.
 
 After the server is ready, run the dependency-free live verifier to check
 Responses text/SSE, stateful tool continuation, strict JSON schema, reasoning,
@@ -612,6 +615,11 @@ python3 scripts/verify-responses-api-live.py \
   --model deepseek-v4-flash-vision-exp \
   --output results/responses-api-live.json
 ```
+
+To exercise the terminal LRU contract, recreate every rank with
+`DSPARK_RESPONSES_STORE_MAX_ENTRIES=2` and add `--store-capacity 2` to the
+command. The argument must equal the server cap; values are intentionally
+limited to `2..16` to prevent an accidental large generation sweep.
 
 The verifier above is the store/tool/cache and broad no-regression gate. Issue
 #138 has a separate mode-strict verifier for stateless **full-history replay**;
@@ -659,7 +667,7 @@ only when the corresponding live behavior is outside the test scope.
 | `docker-compose.dspark-nfs.override.yml` | Worker: named NFS volume + local JIT overlays |
 | `scripts/overlay-vision-exp-ablit-cache.py` | Hardlink official Vision-Exp blobs + copy the 26 ablit shards |
 | `scripts/benchmark-0731.py` | Prompt × concurrency sweep |
-| `scripts/verify-responses-api-live.py` | Strict Responses, multi-turn cache, and disconnect gates |
+| `scripts/verify-responses-api-live.py` | Strict Responses, store LRU, multi-turn cache, and disconnect gates |
 | `scripts/verify-issue138-responses-history-live.py` | Mode-strict stock/enabled full-history replay gate |
 | [docs/ENVS.md](docs/ENVS.md) | Anemll vs Stage-C env matrix |
 | [docs/PATCHES.md](docs/PATCHES.md) | Keys / #27 / #22 notes |

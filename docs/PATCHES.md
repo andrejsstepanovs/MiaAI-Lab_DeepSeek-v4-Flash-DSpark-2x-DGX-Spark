@@ -204,6 +204,34 @@ docker exec <container> bash /path/to/hotfix-nvfp4-ds-mla-issue22.sh
 
 ---
 
+## Issue #27 — partial-prefill admission cap (running-derived count)
+
+`patches/hotfix-dsv4-issue27-partial-prefill-concurrency.py` breaks the
+waiting-admission loop once in-flight partial prefills reach
+`DSPARK_MAX_INFLIGHT_PREFILLS` (1–3; fallback
+`SchedulerConfig.max_num_partial_prefills`). The count is derived from
+`self.running` in exact parity with the stock `_inflight_prefills` set:
+requests admitted in earlier steps (list prefix) count while
+`num_computed_tokens < num_prompt_tokens` (the set's own membership, discard at
+the end of the last-chunk step), so release timing and admission decisions
+match the set whenever it is intact; decoders never qualify
+(`num_computed_tokens >= num_prompt_tokens`; an unscheduled decoder sits at
+`num_tokens + num_output_placeholders - 1`). Requests admitted this step (list
+suffix, sized by `scheduled_new_reqs` + `scheduled_resumed_reqs`) count by the
+set's add predicate (`num_computed_tokens + num_scheduled_tokens[request_id]
+< num_tokens`), so single-chunk same-step bursts are not throttled. The set is
+retained only for `_inflight_prefill_reserved_blocks` (issue #154 defense).
+Each `Scheduler` construction logs `[issue27-hotfix] in-flight prefill cap=N
+env=<raw>` once; a bounded tripwire (≤16 warnings per process) logs
+`in-flight prefill undercount` only when the set truly loses a running partial
+prefill; verbose `[issue27-adm]` admission lines require the existing
+`DSPARK_ISSUE43_SCHED_DIAG=1` knob. Any older `[issue27-hotfix]` application
+without the `[issue27-r3]` marker is refused (exit 1); `--status` reports
+`APPLIED (r3)` / `APPLIED (r2, stale)` / `APPLIED (pre-r2, stale)` /
+`NOT APPLIED`.
+
+---
+
 ## Issue #52 — trailing assistant turn closes with EOS (no-op loop)
 
 ### Symptom
@@ -296,6 +324,44 @@ gated-ON/OFF boot proof on both ranks before relying on it in production.
 ```bash
 python3 scripts/test-assistant-final-continuation.py
 ```
+
+## Bounded Responses API store
+
+`VLLM_ENABLE_RESPONSES_API_STORE=1` enables the pinned vLLM process-local
+response store. The stock implementation never evicts. The launcher therefore
+checks and applies `patches/hotfix-dsv4-responses-store.py` on every rank before
+engine startup; missing, drifted, invalid, or failed patching aborts the start.
+Default `0` does not invoke the patcher and leaves `serving.py` byte-identical.
+
+The target is pinned vLLM `752a3a504`:
+
+```text
+/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/openai/responses/serving.py
+stock SHA-256  fe3a48ab09c516835ce6dd1471c06cc784ae7504eaa7af7f10574704106830d8
+patched SHA-256 1b0033131a34e03a2e129743258f5da81b3e60e979072920153f6d09bf4e5d8f
+```
+
+`DSPARK_RESPONSES_STORE_MAX_ENTRIES` is a positive terminal-entry cap
+(default `256`). Response, rendered-message, and background-event state is one
+eviction bundle. Retrieval and `previous_response_id` continuation refresh LRU
+recency. Continuation preprocessing pins its bundle against concurrent
+eviction; tracked background producers are retained until their synchronous
+completion callback terminalizes status, signals waiting streams, and prunes.
+Background event state is published before the lazy reader is returned, and
+readers capture that state so later dictionary eviction cannot truncate replay.
+Foreground stream messages are retained only after iteration begins and are
+removed on error or early close unless a terminal response was stored.
+
+Queued, in-progress, pinned, and tracked-producer entries can temporarily exceed
+the terminal cap. The setting bounds entry count, not bytes or concurrent
+request admission. Stored state remains memory-only and is lost on any process
+restart. Recreate every rank when changing either setting; a Docker restart
+preserves the patched writable layer, not stored Responses state.
+
+The patcher accepts only the exact stock or patched full-file hash, compiles the
+postimage, preserves file mode, publishes through a same-directory atomic
+rename, verifies the result, and rolls back on failed post-publication
+verification. `--check`/`--status` are non-mutating.
 
 ## Issue #138 — type-less assistant `output_text` history replay
 
