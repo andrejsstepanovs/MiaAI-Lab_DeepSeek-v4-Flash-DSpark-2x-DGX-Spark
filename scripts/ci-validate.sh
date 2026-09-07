@@ -79,6 +79,8 @@ py_files+=(
   scripts/test-dspark-swa-prefix.py
   scripts/test-dsml-recovery.py
   scripts/test-mxfp4-indexer-cache.py
+  scripts/test-c128a-prefill-cache.py
+  patches/hotfix-vllm-c128a-prefill-cache.py
   scripts/test-issue144-effort-align.py
   patches/hotfix-dsv4-issue144-effort-align.py
   scripts/test-issue117-shm-ring-buffer.py
@@ -153,6 +155,8 @@ python3 scripts/test-dsml-recovery.py -q
 ok "test-dsml-recovery"
 python3 scripts/test-mxfp4-indexer-cache.py -q
 ok "test-mxfp4-indexer-cache"
+python3 scripts/test-c128a-prefill-cache.py -q
+ok "test-c128a-prefill-cache"
 python3 scripts/test-issue144-effort-align.py -q
 ok "test-issue144-effort-align"
 python3 scripts/test-issue117-shm-ring-buffer.py -q
@@ -356,6 +360,13 @@ if grep -Fq 'LIMIT_MM_ARGS=(--limit-mm-per-prompt "$${LIMIT_MM_JSON}")' docker-c
   ok "limit-mm-per-prompt is converted to JSON before vllm argparse"
 else
   bad "compose must not pass bare image=8 to --limit-mm-per-prompt (JSON only)"
+fi
+# The env example must document image=N (bare JSON loses quotes when sourced).
+if grep -Fq '# LIMIT_MM_PER_PROMPT=image=' .env.dspark.example \
+  && ! grep -Fq '# LIMIT_MM_PER_PROMPT={"image":8}' .env.dspark.example; then
+  ok "env example documents LIMIT_MM_PER_PROMPT in image=N form"
+else
+  bad "env example must keep '# LIMIT_MM_PER_PROMPT=image=N' (bare JSON loses quotes when sourced)"
 fi
 # Assistant-final continuation (#52/PR53): default OFF (stock renderer);
 # ON must be an exactly-1 gate with a fail-closed invocation.

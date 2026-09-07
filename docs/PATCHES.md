@@ -1258,3 +1258,32 @@ kernels (~minutes; persisted in `VLLM_CACHE_ROOT/deep_gemm`).
 quantizes indexer *scores* — top-k selection, never attention values — so the
 risk is selection drift at depth: run ruler-lite 32K/131K, the context-garble
 sweep to 900K, and the 128K TTFT A/B vs control before flipping the default.
+
+## C128A prefill metadata cache (default OFF)
+
+`DSPARK_ENABLE_C128A_PREFILL_CACHE=1` applies
+`patches/hotfix-vllm-c128a-prefill-cache.py` on the pinned Anemll 0.1.1
+vLLM (`0.25.2.dev0+g752a3a504.d20260714`).
+
+The SM120 attention path previously converted C128A local top-k indices to
+physical slots separately in every layer. The first consumer now stores the
+unchanged conversion's return tuple on its `DeepseekV4FlashMLAMetadata`;
+later consumers sharing that metadata reuse it. The GPU runner builds fresh
+metadata each forward and shares it per attention subgroup within a KV group,
+so the cache cannot carry old physical block IDs into the next step. C4A
+indices remain layer-dependent; C4A, decode, SM100 and the conversion kernel
+are unchanged. No persistent tensors or output-buffer API are added.
+
+The launcher synchronizes the selected patcher, preflights workers and head
+with `--check`, and applies at container startup. The patcher validates both
+source regions and compiles both candidates before per-file atomic replacement.
+`--status` validates source compatibility without writing. An unexpected
+version, missing/duplicated region or damaged cache region fails closed.
+Disable the gate and recreate containers to restore stock.
+
+CPU regression: `python3 scripts/test-c128a-prefill-cache.py`. It exercises
+the pinned prefill method with a physical-index model, covering shared metadata,
+new-step block changes, C4 layer-specific indices and mixed-batch slicing.
+Runtime qualification and timing must be reported separately; reduced conversion
+count alone is not an end-to-end speedup claim. Context-parallel and full-graph
+prefill configurations beyond the qualified GPU-runner lane remain unverified.
