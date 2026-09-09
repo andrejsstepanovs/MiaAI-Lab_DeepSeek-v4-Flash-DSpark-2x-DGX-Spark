@@ -33,6 +33,7 @@ for f in \
   scripts/validate_tp3.sh \
   lmcache/run-lmcache-server.sh \
   scripts/test-lmcache-compose-gate.sh \
+  scripts/selftest-runtime-ablation.sh \
   patches/*.sh
 do
   [ -e "$f" ] || continue
@@ -86,6 +87,8 @@ py_files+=(
   scripts/test-issue117-shm-ring-buffer.py
   scripts/verify-issue136-xgrammar-live.py
   scripts/test-empty-encoder-output-hotfix.py
+  scripts/test-runtime-ablation.py
+  scripts/selftest-runtime-ablation.py
   scripts/ruler-lite.py
   scripts/verify-dsv4-027-equality-gate.py
   scripts/ab-issue133-triton-specialization.py
@@ -163,6 +166,8 @@ python3 scripts/test-issue117-shm-ring-buffer.py -q
 ok "test-issue117-shm-ring-buffer"
 python3 scripts/test-empty-encoder-output-hotfix.py -q
 ok "test-empty-encoder-output-hotfix"
+python3 scripts/test-runtime-ablation.py -q
+ok "test-runtime-ablation"
 python3 tests/test_issue27_inflight_cap.py -q
 ok "test_issue27_inflight_cap"
 python3 tests/test_adaptive_prefill_chunk.py -q
@@ -464,6 +469,7 @@ for p in \
   patches/hotfix-dsv4-replicate-markov-head.py \
   patches/hotfix-dsv4-issue133-triton-specialization.py \
   patches/hotfix-dsv4-issue141-sparse-mla-decode-chunk.py \
+  patches/hotfix-dsv4-runtime-ablation.py \
   patches/hotfix-vllm-empty-encoder-output.py \
   patches/hotfix-dsv4-vision-exp.py \
   patches/hotfix-vllm-issue136-xgrammar-termination.py \

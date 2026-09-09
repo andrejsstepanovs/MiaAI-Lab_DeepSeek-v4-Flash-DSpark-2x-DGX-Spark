@@ -87,6 +87,34 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 _dspark_env_clean="$(mktemp)"
 chmod 600 "$_dspark_env_clean"
+# Preserve explicit one-shot runtime-ablation overrides across sourcing the
+# persistent env file. This makes `ABLATE=1 ./start-...` behave as expected;
+# the resolved values are also injected into the worker compose command.
+_dspark_ambient_ablate_has=0
+_dspark_ambient_ablate=""
+_dspark_ambient_ablate_lambda_has=0
+_dspark_ambient_ablate_lambda=""
+_dspark_ambient_ablate_layers_has=0
+_dspark_ambient_ablate_layers=""
+_dspark_ambient_ablate_source_has=0
+_dspark_ambient_ablate_source=""
+if [ -n "${ABLATE+x}" ]; then
+  _dspark_ambient_ablate_has=1
+  _dspark_ambient_ablate="$ABLATE"
+fi
+if [ -n "${DSV4_ABLATE_LAMBDA+x}" ]; then
+  _dspark_ambient_ablate_lambda_has=1
+  _dspark_ambient_ablate_lambda="$DSV4_ABLATE_LAMBDA"
+fi
+if [ -n "${DSV4_ABLATE_LAYERS+x}" ]; then
+  _dspark_ambient_ablate_layers_has=1
+  _dspark_ambient_ablate_layers="$DSV4_ABLATE_LAYERS"
+fi
+if [ -n "${DSPARK_ABLATE_SOURCE_FILE+x}" ]; then
+  _dspark_ambient_ablate_source_has=1
+  _dspark_ambient_ablate_source="$DSPARK_ABLATE_SOURCE_FILE"
+fi
+
 # DSPARK_API_KEYS ambient guard (begin)
 _dspark_ambient_has=0
 _dspark_ambient_keys=""
@@ -105,6 +133,18 @@ if [ "$_dspark_ambient_has" = "1" ] && [ "$_dspark_ambient_keys" != "${DSPARK_AP
   exit 2
 fi
 # DSPARK_API_KEYS ambient guard (end)
+if [ "$_dspark_ambient_ablate_has" = "1" ]; then
+  ABLATE="$_dspark_ambient_ablate"
+fi
+if [ "$_dspark_ambient_ablate_lambda_has" = "1" ]; then
+  DSV4_ABLATE_LAMBDA="$_dspark_ambient_ablate_lambda"
+fi
+if [ "$_dspark_ambient_ablate_layers_has" = "1" ]; then
+  DSV4_ABLATE_LAYERS="$_dspark_ambient_ablate_layers"
+fi
+if [ "$_dspark_ambient_ablate_source_has" = "1" ]; then
+  DSPARK_ABLATE_SOURCE_FILE="$_dspark_ambient_ablate_source"
+fi
 COMPOSE_ENV_FILE="$_dspark_env_clean"
 
 # GPU util comes from GPU_MEMORY_UTILIZATION_TEXT (default 0.835).
@@ -124,22 +164,84 @@ if [ "${DSPARK_TP3:-0}" = "1" ]; then
   export MAX_NUM_SEQS
 fi
 
-# Checkpoint flag: official Vision-Exp vs Keys abliterated weights.
-#   ABLITERATED=0 → DSPARK_MODEL_OFFICIAL
-#   ABLITERATED=1 → DSPARK_MODEL_ABLITERATED
+# Checkpoint flag: official Vision-Exp vs gated runtime ablation.
+#   ABLITERATED=0 → official weights, stock decoder
+#   ABLITERATED=1 → official weights + runtime direction (not the 157 GiB
+#                   Keys checkpoint). Requires a prior gated Hub download.
 DSPARK_MODEL_OFFICIAL="${DSPARK_MODEL_OFFICIAL:-deepseek-ai/DeepSeek-V4-Flash-Vision-Exp}"
 DSPARK_MODEL_ABLITERATED="${DSPARK_MODEL_ABLITERATED:-drowzeys/keys-DeepSeekV4Flash-Vision-EXP-ablit}"
 DEFAULT_OFFICIAL_REVISION="86f746b36186f0e567729a5c06a8c918caba82a9"
-if [ "${ABLITERATED:-0}" = "1" ]; then
-  DSPARK_MODEL="$DSPARK_MODEL_ABLITERATED"
-  DSPARK_REVISION="${DSPARK_REVISION_ABLITERATED:-}"
-else
-  DSPARK_MODEL="$DSPARK_MODEL_OFFICIAL"
-  if [ -z "${DSPARK_REVISION+x}" ]; then
-    DSPARK_REVISION="$DEFAULT_OFFICIAL_REVISION"
-  fi
+DSPARK_MODEL="$DSPARK_MODEL_OFFICIAL"
+if [ -z "${DSPARK_REVISION+x}" ]; then
+  DSPARK_REVISION="$DEFAULT_OFFICIAL_REVISION"
 fi
 export ABLITERATED DSPARK_MODEL DSPARK_MODEL_OFFICIAL DSPARK_MODEL_ABLITERATED DSPARK_REVISION
+
+# Runtime refusal-direction projection. User-facing switch is ABLITERATED=1;
+# that implies ABLATE=1 after the gated 18 KiB direction is on disk.
+DSV4_ABLATE_LAMBDA="${DSV4_ABLATE_LAMBDA:-3.5}"
+DSV4_ABLATE_LAYERS="${DSV4_ABLATE_LAYERS:-10-42}"
+DSPARK_ABLATE_DIRECTION_SHA256="${DSPARK_ABLATE_DIRECTION_SHA256:-6e4d8a8f3aa9e21795faab2c5b14d29b019acdf2ddbfbd8238430458a5837fe0}"
+_ablate_cache="${HF_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}}"
+_ablate_gate_dir="${_ablate_cache}/dspark-ablation"
+_ablate_gate_terms="${_ablate_gate_dir}/RESPONSIBLE_USE.md"
+_ablate_gate_direction="${_ablate_gate_dir}/direction_r1.pt"
+if [ "${ABLITERATED:-0}" = "1" ]; then
+  ABLATE=1
+elif [ "${ABLATE:-0}" = "1" ]; then
+  echo "ABLATE=1 is gated on ABLITERATED=1. Agree to the Keys Hub terms at" >&2
+  echo "  https://huggingface.co/${DSPARK_MODEL_ABLITERATED}" >&2
+  echo "then run: ./prepare-dspark-model-cache.sh --abliterated" >&2
+  exit 2
+else
+  ABLATE=0
+fi
+DSPARK_ABLATE_SOURCE_FILE="${DSPARK_ABLATE_SOURCE_FILE:-$_ablate_gate_direction}"
+case "$ABLATE" in
+  0|1) ;;
+  *) echo "ABLATE must be 0 or 1 (got: $ABLATE)" >&2; exit 2 ;;
+esac
+if [ "$ABLATE" = "1" ]; then
+  if [[ ! "$DSV4_ABLATE_LAYERS" =~ ^([0-9]+)[[:space:]]*-[[:space:]]*([0-9]+)$ ]]; then
+    echo "DSV4_ABLATE_LAYERS must look like 10-42 (got: $DSV4_ABLATE_LAYERS)" >&2
+    exit 2
+  fi
+  _ablate_layer_lo="${BASH_REMATCH[1]}"
+  _ablate_layer_hi="${BASH_REMATCH[2]}"
+  if (( 10#$_ablate_layer_lo > 10#$_ablate_layer_hi || 10#$_ablate_layer_hi > 42 )); then
+    echo "DSV4_ABLATE_LAYERS must be an ordered range within target layers 0-42 (got: $DSV4_ABLATE_LAYERS)" >&2
+    exit 2
+  fi
+  if ! python3 - "$DSV4_ABLATE_LAMBDA" <<'PY'
+import math
+import sys
+try:
+    value = float(sys.argv[1])
+except ValueError:
+    raise SystemExit(1)
+raise SystemExit(0 if math.isfinite(value) and value >= 0.0 else 1)
+PY
+  then
+    echo "DSV4_ABLATE_LAMBDA must be a finite non-negative number (got: $DSV4_ABLATE_LAMBDA)" >&2
+    exit 2
+  fi
+  if [[ "$DSPARK_ABLATE_SOURCE_FILE" != /* ]]; then
+    DSPARK_ABLATE_SOURCE_FILE="$SCRIPT_DIR/$DSPARK_ABLATE_SOURCE_FILE"
+  fi
+  if [ ! -f "$_ablate_gate_terms" ] || [ ! -f "$DSPARK_ABLATE_SOURCE_FILE" ]; then
+    echo "ABLITERATED=1 requires a gated Hugging Face download (Keys terms + 18 KiB direction)." >&2
+    echo "Agree at https://huggingface.co/${DSPARK_MODEL_ABLITERATED}" >&2
+    echo "then run: ./prepare-dspark-model-cache.sh --abliterated" >&2
+    echo "Missing: $_ablate_gate_terms and/or $DSPARK_ABLATE_SOURCE_FILE" >&2
+    exit 1
+  fi
+  _ablate_actual_sha="$(sha256sum "$DSPARK_ABLATE_SOURCE_FILE" | awk '{print $1}')"
+  if [ "$_ablate_actual_sha" != "$DSPARK_ABLATE_DIRECTION_SHA256" ]; then
+    echo "Ablation direction SHA-256 mismatch (got $_ablate_actual_sha, expected $DSPARK_ABLATE_DIRECTION_SHA256)" >&2
+    exit 1
+  fi
+fi
+export ABLATE DSV4_ABLATE_LAMBDA DSV4_ABLATE_LAYERS DSPARK_ABLATE_SOURCE_FILE DSPARK_ABLATE_DIRECTION_SHA256
 
 # Vision-Exp: Anemll SpeculativeConfig requires
 # num_speculative_tokens % num_nextn_predict_layers == 0 when k > n_predict.
@@ -543,6 +645,68 @@ need_cmd() {
     echo "Missing required command: $1" >&2
     exit 1
   fi
+}
+
+_stage_ablation_direction_remote() {
+  local host="$1" cache_dir="$2" label="$3" expected="$4"
+  local remote_dir remote_target remote_dir_q remote_target_q expected_q
+  remote_dir="${cache_dir}/dspark-ablation"
+  remote_target="${remote_dir}/direction_r1.pt"
+  printf -v remote_dir_q '%q' "$remote_dir"
+  printf -v remote_target_q '%q' "$remote_target"
+  printf -v expected_q '%q' "$expected"
+  if ! ssh "$host" "
+    set -euo pipefail
+    _dir=$remote_dir_q
+    _target=$remote_target_q
+    _expected=$expected_q
+    mkdir -p \"\$_dir\"
+    _tmp=\"\${_target}.tmp.\$\$\"
+    trap 'rm -f -- \"\$_tmp\"' EXIT
+    cat > \"\$_tmp\"
+    _actual=\$(sha256sum \"\$_tmp\" | awk '{print \$1}')
+    [ \"\$_actual\" = \"\$_expected\" ] || { echo '${label} ablation direction SHA-256 mismatch' >&2; exit 1; }
+    chmod 0644 \"\$_tmp\"
+    mv -f -- \"\$_tmp\" \"\$_target\"
+    trap - EXIT
+  " < "$DSPARK_ABLATE_SOURCE_FILE"; then
+    echo "Failed to stage the ablation direction on $label $host" >&2
+    return 1
+  fi
+}
+
+stage_ablation_direction() {
+  [ "$ABLATE" = "1" ] || return 0
+  [ -n "${HF_CACHE:-}" ] || { echo "ABLATE=1 requires HF_CACHE" >&2; return 1; }
+  [ -n "${WORKER_HF_CACHE:-}" ] || { echo "ABLATE=1 requires WORKER_HF_CACHE or HF_CACHE" >&2; return 1; }
+
+  local expected local_dir local_target local_tmp
+  expected="$(sha256sum "$DSPARK_ABLATE_SOURCE_FILE" | awk '{print $1}')"
+  local_dir="${HF_CACHE}/dspark-ablation"
+  local_target="${local_dir}/direction_r1.pt"
+  mkdir -p "$local_dir"
+  local_tmp="$(mktemp "${local_target}.tmp.XXXXXX")"
+  if ! cp "$DSPARK_ABLATE_SOURCE_FILE" "$local_tmp"; then
+    rm -f -- "$local_tmp"
+    return 1
+  fi
+  chmod 0644 "$local_tmp"
+  if [ "$(sha256sum "$local_tmp" | awk '{print $1}')" != "$expected" ]; then
+    rm -f -- "$local_tmp"
+    echo "Local staged ablation direction failed SHA-256 verification" >&2
+    return 1
+  fi
+  mv -f -- "$local_tmp" "$local_target"
+
+  # NFS workers mount the head HF_CACHE read-only, so the local copy is what
+  # the container sees. Still copy onto each worker cache for the non-NFS path
+  # and as a belt-and-suspenders check of the file bytes.
+  _stage_ablation_direction_remote "$WORKER_HOST" "$WORKER_HF_CACHE" "worker" "$expected" || return 1
+  if [ "${DSPARK_TP3:-0}" = "1" ]; then
+    [ -n "${WORKER2_HF_CACHE:-}" ] || { echo "ABLATE=1 with TP=3 requires WORKER2_HF_CACHE" >&2; return 1; }
+    _stage_ablation_direction_remote "$WORKER2_HOST" "$WORKER2_HF_CACHE" "worker2" "$expected" || return 1
+  fi
+  echo "Runtime-ablation direction staged on both nodes (sha256=$expected)"
 }
 
 # Strip user@ from ssh targets / host strings → bare host or IPv4.
@@ -963,7 +1127,7 @@ remote_nccl_env() {
   # compose interpolation, and the shared entrypoint normalization makes the
   # defined-empty variable truly absent in the container (NCCL would parse a
   # defined-empty value as GID index 0).
-  printf "NCCL_IB_HCA='%s' NCCL_SOCKET_IFNAME='%s' TP_SOCKET_IFNAME='%s' GLOO_SOCKET_IFNAME='%s' NCCL_IB_GID_INDEX='%s' NCCL_IB_MERGE_NICS='%s' NCCL_IB_SUBNET_AWARE_ROUTING='%s' NCCL_IB_SUBNET_PREFIX_LEN='%s' VLLM_HOST='%s' VLLM_PORT='%s'" \
+  printf "NCCL_IB_HCA='%s' NCCL_SOCKET_IFNAME='%s' TP_SOCKET_IFNAME='%s' GLOO_SOCKET_IFNAME='%s' NCCL_IB_GID_INDEX='%s' NCCL_IB_MERGE_NICS='%s' NCCL_IB_SUBNET_AWARE_ROUTING='%s' NCCL_IB_SUBNET_PREFIX_LEN='%s' VLLM_HOST='%s' VLLM_PORT='%s' ABLATE='%s' DSV4_ABLATE_LAMBDA='%s' DSV4_ABLATE_LAYERS='%s'" \
     "$WORKER_NCCL_IB_HCA" \
     "$WORKER_NCCL_SOCKET_IFNAME" \
     "$WORKER_TP_SOCKET_IFNAME" \
@@ -973,7 +1137,10 @@ remote_nccl_env() {
     "${NCCL_IB_SUBNET_AWARE_ROUTING:-}" \
     "${NCCL_IB_SUBNET_PREFIX_LEN:-}" \
     "$VLLM_HOST" \
-    "$VLLM_PORT"
+    "$VLLM_PORT" \
+    "${ABLATE:-0}" \
+    "${DSV4_ABLATE_LAMBDA:-3.5}" \
+    "${DSV4_ABLATE_LAYERS:-10-42}"
 }
 
 compose_base() {
@@ -1001,13 +1168,16 @@ compose_base() {
     TP_SIZE="$TP_SIZE" \
     NNODES="$NNODES" \
     TP3_PATCH_DIR="${TP3_PATCH_DIR:-$SCRIPT_DIR/patches/tp3}" \
+    ABLATE="${ABLATE:-0}" \
+    DSV4_ABLATE_LAMBDA="${DSV4_ABLATE_LAMBDA:-3.5}" \
+    DSV4_ABLATE_LAYERS="${DSV4_ABLATE_LAYERS:-10-42}" \
     NODE_RANK="$1" \
     HEADLESS="$2" \
     docker compose -p "$PROJECT_NAME" --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" "${@:3}"
 }
 
 remote_nccl_env2() {
-  printf "NCCL_IB_HCA='%s' NCCL_SOCKET_IFNAME='%s' TP_SOCKET_IFNAME='%s' GLOO_SOCKET_IFNAME='%s' NCCL_IB_GID_INDEX='%s' NCCL_IB_MERGE_NICS='%s' NCCL_IB_SUBNET_AWARE_ROUTING='%s' NCCL_IB_SUBNET_PREFIX_LEN='%s' VLLM_HOST='%s' VLLM_PORT='%s'" \
+  printf "NCCL_IB_HCA='%s' NCCL_SOCKET_IFNAME='%s' TP_SOCKET_IFNAME='%s' GLOO_SOCKET_IFNAME='%s' NCCL_IB_GID_INDEX='%s' NCCL_IB_MERGE_NICS='%s' NCCL_IB_SUBNET_AWARE_ROUTING='%s' NCCL_IB_SUBNET_PREFIX_LEN='%s' VLLM_HOST='%s' VLLM_PORT='%s' ABLATE='%s' DSV4_ABLATE_LAMBDA='%s' DSV4_ABLATE_LAYERS='%s'" \
     "$WORKER2_NCCL_IB_HCA" \
     "$WORKER2_NCCL_SOCKET_IFNAME" \
     "$WORKER2_TP_SOCKET_IFNAME" \
@@ -1017,7 +1187,10 @@ remote_nccl_env2() {
     "${NCCL_IB_SUBNET_AWARE_ROUTING:-}" \
     "${NCCL_IB_SUBNET_PREFIX_LEN:-}" \
     "$VLLM_HOST" \
-    "$VLLM_PORT"
+    "$VLLM_PORT" \
+    "${ABLATE:-0}" \
+    "${DSV4_ABLATE_LAMBDA:-3.5}" \
+    "${DSV4_ABLATE_LAYERS:-10-42}"
 }
 
 remote_compose() {
@@ -1084,6 +1257,11 @@ print_resolved_profile() {
   echo "Resolved DSpark profile:"
   echo "  project: $PROJECT_NAME"
   echo "  checkpoint: $DSPARK_MODEL (ABLITERATED=${ABLITERATED:-0})"
+  if [ "$ABLATE" = "1" ]; then
+    echo "  runtime ablation: ON (gated Hub terms + 18 KiB direction, lambda=$DSV4_ABLATE_LAMBDA, layers=$DSV4_ABLATE_LAYERS, source=$DSPARK_ABLATE_SOURCE_FILE)"
+  else
+    echo "  runtime ablation: off (stock model.py)"
+  fi
   if [ -n "${DSPARK_REVISION:-}" ]; then
     echo "  revision: $DSPARK_REVISION"
   else
@@ -1209,6 +1387,7 @@ need_cmd docker
 need_cmd ssh
 need_cmd scp
 need_cmd curl
+need_cmd sha256sum
 
 if [ "$ENABLE_VLLM_GB10_PATCH" != "0" ] && [ "$ENABLE_VLLM_GB10_PATCH" != "1" ]; then
   echo "ENABLE_VLLM_GB10_PATCH must be 0 or 1." >&2
@@ -1323,6 +1502,7 @@ apply_tp3_bootstrap_ifaces() {
   echo "TP=3 RoCE: NCCL_IB_MERGE_NICS=0 NCCL_IB_SUBNET_AWARE_ROUTING=1 NCCL_IB_SUBNET_PREFIX_LEN=24"
 }
 
+stage_ablation_direction
 cd "$SCRIPT_DIR"
 resolve_nccl_gid_indexes
 apply_tp3_bootstrap_ifaces
@@ -1460,6 +1640,15 @@ if [ -f "$DSPARK_DEEPGEMM_ALIAS_HOTFIX" ]; then
   echo "Syncing DeepGEMM sm121 header alias hotfix to ${WORKER_HOST}:${WORKER_DIR}/patches/"
   ssh "$WORKER_HOST" "mkdir -p '${REMOTE_WORKER_DIR}/patches'"
   scp "$DSPARK_DEEPGEMM_ALIAS_HOTFIX" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/patches/hotfix-deepgemm-sm121-mqa-header-alias.sh"
+fi
+DSPARK_ABLATION_HOTFIX="${DSPARK_ABLATION_HOTFIX:-$SCRIPT_DIR/patches/hotfix-dsv4-runtime-ablation.py}"
+if [ -f "$DSPARK_ABLATION_HOTFIX" ]; then
+  echo "Syncing runtime-ablation hotfix to ${WORKER_HOST}:${WORKER_DIR}/patches/"
+  ssh "$WORKER_HOST" "mkdir -p '${REMOTE_WORKER_DIR}/patches'"
+  scp "$DSPARK_ABLATION_HOTFIX" "${WORKER_HOST}:${REMOTE_WORKER_DIR}/patches/hotfix-dsv4-runtime-ablation.py"
+elif [ "$ABLATE" = "1" ]; then
+  echo "Missing required runtime-ablation hotfix: $DSPARK_ABLATION_HOTFIX" >&2
+  exit 1
 fi
 DSPARK_SUPPRESS_STOPS_HOTFIX="${DSPARK_SUPPRESS_STOPS_HOTFIX:-$SCRIPT_DIR/patches/hotfix-dsv4-suppress-stops-in-reasoning.py}"
 if [ -f "$DSPARK_SUPPRESS_STOPS_HOTFIX" ]; then

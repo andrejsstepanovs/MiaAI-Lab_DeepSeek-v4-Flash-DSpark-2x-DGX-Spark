@@ -77,8 +77,9 @@ Qwen3.8-Flash-vLLM).
    ```
 
    Use `--abliterated` or `--yes` (reads `ABLITERATED` from `.env.dspark`).
-   Abliterated weights are gated (`HF_TOKEN`). Prepare forces HF
-   online even if `HF_HUB_OFFLINE=1`, then you can serve offline.
+   Abliteration is gated (`HF_TOKEN`): agree on the Keys Hub repo, then
+   prepare downloads the 18 KiB direction — not the 157 GiB checkpoint.
+   Prepare forces HF online even if `HF_HUB_OFFLINE=1`, then you can serve offline.
    Default `DSPARK_WORKER_HF_NFS=0` also downloads onto the worker. After
    the cache is complete, keep `HF_HUB_OFFLINE=1`. See
    [Worker weights over NFS](#worker-weights-over-nfs-optional) to skip the
@@ -174,7 +175,7 @@ cluster wiring, not product switches. Full Anemll vs Stage-C matrix:
 
 | Variable | Default | What it does |
 | --- | --- | --- |
-| **`ABLITERATED`** | `0` | **`0`** = official [`deepseek-ai/DeepSeek-V4-Flash-Vision-Exp`](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-Vision-Exp) @ `DSPARK_REVISION`. **`1`** = [Keys abliterated](https://huggingface.co/drowzeys/keys-DeepSeekV4Flash-Vision-EXP-ablit). Start and prepare pick the HF id from this flag. Gated; `prepare --abliterated` needs `HF_TOKEN`. |
+| **`ABLITERATED`** | `0` | **`0`** = official [`deepseek-ai/DeepSeek-V4-Flash-Vision-Exp`](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-Vision-Exp) @ `DSPARK_REVISION`, stock decoder. **`1`** = same official weights plus runtime refusal-direction projection. Does **not** download the 157 GiB [Keys checkpoint](https://huggingface.co/drowzeys/keys-DeepSeekV4Flash-Vision-EXP-ablit). You must agree to that repo's gated terms, then `prepare --abliterated` downloads `RESPONSIBLE_USE.md` plus the 18 KiB direction (`HF_TOKEN`). Recreate both ranks after flipping. Default `λ=3.5`, layers `10-42`. The direction was captured on 0731 FP8 DSpark; transfer onto Vision-Exp is experimental. |
 | `DSPARK_REVISION` | `86f746b36186f0e567729a5c06a8c918caba82a9` | Official Vision-Exp pin. Empty = tip of `main`. |
 | `DSPARK_REVISION_ABLITERATED` | empty | Abliterated pin. Empty = tip of that repo. |
 | `DSPARK_MODEL_OFFICIAL` / `DSPARK_MODEL_ABLITERATED` | the two HF ids above | Override only if you intentionally swap the repo id. Do not point this at the 0731 ablit dump — that drops `image_url`. |
@@ -686,7 +687,7 @@ Full list: [`CREDITS.md`](CREDITS.md).
 patch, ragged `query_start_loc`, `nvfp4_ds_mla` wiring.
 
 **[@u1tra_instinct](https://x.com/u1tra_instinct)** — abliterated Vision-Exp
-weights (`ABLITERATED=1`), from the original repo
+path (`ABLITERATED=1`), gated on
 [`drowzeys/keys-DeepSeekV4Flash-Vision-EXP-ablit`](https://huggingface.co/drowzeys/keys-DeepSeekV4Flash-Vision-EXP-ablit).
 
 Also: [tonyd2wild](https://github.com/tonyd2wild/), Rafael Caricio, Fraser Price,
