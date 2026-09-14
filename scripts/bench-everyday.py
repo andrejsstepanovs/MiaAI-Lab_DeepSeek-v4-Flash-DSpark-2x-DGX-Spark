@@ -24,7 +24,10 @@ import statistics
 import time
 import urllib.error
 import urllib.request
+import uuid
 from datetime import datetime, timezone
+
+RUN_ID = uuid.uuid4().hex[:8]
 
 DEFAULT_PROMPT_FILE = "/var/tmp/random_message_prompt_all.md"
 DEFAULT_BASE_URL = "http://127.0.0.1:8000/v1"
@@ -169,7 +172,7 @@ async def run_case(base_url, model, prompt_file, multiplier, concurrency, user_m
                     "requests": [warm]}
         nonces = ["cached"] * concurrency
     else:
-        nonces = [f"t{trial}-r{index}" for index in range(concurrency)]
+        nonces = [f"{RUN_ID}-t{trial}-r{index}" for index in range(concurrency)]
     started = time.perf_counter()
     results = await asyncio.gather(*[one(nonce) for nonce in nonces])
     elapsed = time.perf_counter() - started

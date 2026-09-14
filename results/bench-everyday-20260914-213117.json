@@ -1,0 +1,79 @@
+{
+  "timestamp": "2026-09-14T19:29:26.208367+00:00",
+  "config": {
+    "base_url": "http://127.0.0.1:8000/v1",
+    "model": "deepseek-v4-flash-vision-exp",
+    "prompt_file": "/var/tmp/random_message_prompt_all.md",
+    "multiplier": 8,
+    "prompt_tokens": 60493,
+    "concurrencies": [
+      2
+    ],
+    "repeat": 1,
+    "max_tokens": 2048,
+    "min_tokens": 0,
+    "user_message": "Give me a brief overview of what's going on right now and what's coming up.",
+    "thinking": "server",
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "cached": false
+  },
+  "cases": [
+    {
+      "concurrency": 2,
+      "trial": 0,
+      "elapsed_s": 110.813584902,
+      "aggregate_tok_s": 14.18598632460295,
+      "median_decode_tok_s": 23.863358107464443,
+      "median_ttft_s": 67.0880902429999,
+      "n_ok": 2,
+      "n_fail": 0,
+      "requests": [
+        {
+          "ok": true,
+          "error": null,
+          "ttft_s": 44.47232776999954,
+          "first_content_s": 104.98007732800033,
+          "elapsed_s": 108.73178150900094,
+          "completion_tokens": 841,
+          "prompt_tokens": 60610,
+          "reasoning_tokens": null,
+          "cached_tokens": 0,
+          "decode_tok_s": 13.087568459822846,
+          "reasoning_chars": 2673,
+          "content_chars": 94
+        },
+        {
+          "ok": true,
+          "error": null,
+          "ttft_s": 89.70385271600026,
+          "first_content_s": null,
+          "elapsed_s": 110.80714328100112,
+          "completion_tokens": 731,
+          "prompt_tokens": 60610,
+          "reasoning_tokens": null,
+          "cached_tokens": 0,
+          "decode_tok_s": 34.63914775510604,
+          "reasoning_chars": 2539,
+          "content_chars": 0
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "2": {
+      "concurrency": 2,
+      "n_ok": 2,
+      "n_fail": 0,
+      "median_decode_tok_s": 23.863358107464443,
+      "decode_min": 13.087568459822846,
+      "decode_max": 34.63914775510604,
+      "median_aggregate_tok_s": 14.18598632460295,
+      "median_ttft_s": 67.0880902429999,
+      "median_prompt_tokens": 60610.0,
+      "median_cached_tokens": 0.0,
+      "median_completion_tokens": 786.0,
+      "reasoning_token_share": null
+    }
+  }
+}
