@@ -1,0 +1,62 @@
+{
+  "timestamp": "2026-09-14T15:32:49.441363+00:00",
+  "config": {
+    "base_url": "http://127.0.0.1:8000/v1",
+    "model": "deepseek-v4-flash-vision-exp",
+    "prompt_file": "/var/tmp/random_message_prompt_all.md",
+    "multiplier": 1,
+    "prompt_tokens": 7566,
+    "concurrencies": [
+      1
+    ],
+    "repeat": 1,
+    "max_tokens": 128,
+    "min_tokens": 0,
+    "user_message": "Give me a brief overview of what's going on right now and what's coming up.",
+    "thinking": "server",
+    "temperature": 0.6,
+    "top_p": 0.95
+  },
+  "cases": [
+    {
+      "concurrency": 1,
+      "trial": 0,
+      "elapsed_s": 8.381759081000155,
+      "aggregate_tok_s": 15.271257353382003,
+      "median_decode_tok_s": 45.79051848902943,
+      "median_ttft_s": 5.582795697999927,
+      "n_ok": 1,
+      "n_fail": 0,
+      "requests": [
+        {
+          "ok": true,
+          "error": null,
+          "ttft_s": 5.582795697999927,
+          "first_content_s": null,
+          "elapsed_s": 8.378134214000056,
+          "completion_tokens": 128,
+          "prompt_tokens": 7683,
+          "reasoning_tokens": null,
+          "decode_tok_s": 45.79051848902943,
+          "reasoning_chars": 519,
+          "content_chars": 0
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "1": {
+      "concurrency": 1,
+      "n_ok": 1,
+      "n_fail": 0,
+      "median_decode_tok_s": 45.79051848902943,
+      "decode_min": 45.79051848902943,
+      "decode_max": 45.79051848902943,
+      "median_aggregate_tok_s": 15.271257353382003,
+      "median_ttft_s": 5.582795697999927,
+      "median_prompt_tokens": 7683,
+      "median_completion_tokens": 128,
+      "reasoning_token_share": null
+    }
+  }
+}
