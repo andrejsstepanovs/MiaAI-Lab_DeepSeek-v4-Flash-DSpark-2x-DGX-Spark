@@ -125,11 +125,13 @@ def stream_one(base_url, model, system, user_message, max_tokens, min_tokens,
         return {"ok": False, "error": error, "ttft_s": None,
                 "first_content_s": None, "elapsed_s": finished - started,
                 "completion_tokens": 0, "prompt_tokens": 0, "reasoning_tokens": None,
-                "decode_tok_s": None, "reasoning_chars": 0, "content_chars": 0}
+                "cached_tokens": None, "decode_tok_s": None,
+                "reasoning_chars": 0, "content_chars": 0}
     completion = (usage or {}).get("completion_tokens", 0)
     prompt = (usage or {}).get("prompt_tokens", 0)
     details = (usage or {}).get("completion_tokens_details") or {}
     reasoning_tokens = details.get("reasoning_tokens")
+    cached_tokens = (usage or {}).get("prompt_tokens_details", {}).get("cached_tokens")
     ttft = (first or finished) - started
     decode_window = max(0.001, finished - (first or finished))
     return {
@@ -140,6 +142,7 @@ def stream_one(base_url, model, system, user_message, max_tokens, min_tokens,
         "completion_tokens": completion,
         "prompt_tokens": prompt,
         "reasoning_tokens": reasoning_tokens,
+        "cached_tokens": cached_tokens,
         "decode_tok_s": completion / decode_window,
         "reasoning_chars": reasoning_chars,
         "content_chars": content_chars,
@@ -147,14 +150,26 @@ def stream_one(base_url, model, system, user_message, max_tokens, min_tokens,
 
 
 async def run_case(base_url, model, prompt_file, multiplier, concurrency, user_message,
-                   max_tokens, min_tokens, thinking, temperature, top_p, trial):
+                   max_tokens, min_tokens, thinking, temperature, top_p, trial, cached):
     async def one(nonce):
         system = build_system(nonce, prompt_file, multiplier)
         return await asyncio.to_thread(stream_one, base_url, model, system,
                                        user_message, max_tokens, min_tokens,
                                        thinking, temperature, top_p)
 
-    nonces = [f"t{trial}-r{index}" for index in range(concurrency)]
+    if cached:
+        warm = await asyncio.to_thread(stream_one, base_url, model,
+                                       build_system("warmup", prompt_file, multiplier),
+                                       user_message, max_tokens, min_tokens,
+                                       thinking, temperature, top_p)
+        if not warm["ok"]:
+            return {"concurrency": concurrency, "trial": trial, "elapsed_s": None,
+                    "aggregate_tok_s": None, "median_decode_tok_s": None,
+                    "median_ttft_s": None, "n_ok": 0, "n_fail": concurrency,
+                    "requests": [warm]}
+        nonces = ["cached"] * concurrency
+    else:
+        nonces = [f"t{trial}-r{index}" for index in range(concurrency)]
     started = time.perf_counter()
     results = await asyncio.gather(*[one(nonce) for nonce in nonces])
     elapsed = time.perf_counter() - started
@@ -183,6 +198,7 @@ def summarize(cases, concurrency):
     proms = [r["prompt_tokens"] for r in ok]
     comps = [r["completion_tokens"] for r in ok]
     reas = [r["reasoning_tokens"] for r in ok if r["reasoning_tokens"] is not None]
+    cached = [r["cached_tokens"] for r in ok if r.get("cached_tokens") is not None]
     share = (sum(reas) / sum(comps)) if reas and sum(comps) else None
     return {"concurrency": concurrency, "n_ok": len(ok), "n_fail": n_fail,
             "median_decode_tok_s": statistics.median(decs),
@@ -190,6 +206,7 @@ def summarize(cases, concurrency):
             "median_aggregate_tok_s": statistics.median(aggs) if aggs else None,
             "median_ttft_s": statistics.median(ttfts),
             "median_prompt_tokens": statistics.median(proms),
+            "median_cached_tokens": (statistics.median(cached) if cached else None),
             "median_completion_tokens": statistics.median(comps),
             "reasoning_token_share": share}
 
@@ -217,6 +234,10 @@ async def main():
     ap.add_argument("--top-p", type=float, default=0.95)
     ap.add_argument("--output", default=None,
                     help="JSON output path (default results/bench-everyday-<ts>.json)")
+    ap.add_argument("--cached", action="store_true",
+                    help="reuse one fixed system prefix so requests hit the vLLM "
+                         "prefix cache (warms up once per concurrency level; reports "
+                         "cached_tokens from the usage block)")
     args = ap.parse_args()
 
     if args.multiplier < 1:
@@ -229,7 +250,8 @@ async def main():
     concurrencies = sorted({int(x) for x in args.concurrency.split(",") if x.strip()})
 
     print(f"prompt {args.prompt_file} x{args.multiplier} -> {prompt_tokens} tokens "
-          f"(unique nonce per request, prefix cache bypassed)", flush=True)
+          f"({'cached prefix, warmup + identical system' if args.cached else 'unique nonce per request, prefix cache bypassed'})",
+          flush=True)
 
     output = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -240,7 +262,7 @@ async def main():
             "repeat": args.repeat, "max_tokens": args.max_tokens,
             "min_tokens": args.min_tokens, "user_message": args.user_message,
             "thinking": args.thinking, "temperature": args.temperature,
-            "top_p": args.top_p,
+            "top_p": args.top_p, "cached": args.cached,
         },
         "cases": [],
         "summary": {},
@@ -253,7 +275,7 @@ async def main():
             case = await run_case(args.base_url, args.model, args.prompt_file,
                                   args.multiplier, concurrency, args.user_message,
                                   args.max_tokens, args.min_tokens, args.thinking,
-                                  args.temperature, args.top_p, trial)
+                                  args.temperature, args.top_p, trial, args.cached)
             cases.append(case)
             output["cases"].append(case)
             if case["n_ok"]:
@@ -273,6 +295,7 @@ async def main():
               f"(min {s.get('decode_min')} max {s.get('decode_max')}), "
               f"agg {s.get('median_aggregate_tok_s')} tok/s, "
               f"TTFT {s.get('median_ttft_s')}s, prompt {s.get('median_prompt_tokens')} tok, "
+              f"cached {s.get('median_cached_tokens')} tok, "
               f"completion {s.get('median_completion_tokens')} tok, "
               f"reasoning share {s.get('reasoning_token_share')}, "
               f"ok {s.get('n_ok')} fail {s.get('n_fail')}", flush=True)

@@ -1,0 +1,75 @@
+{
+  "timestamp": "2026-09-14T16:52:29.340076+00:00",
+  "config": {
+    "base_url": "http://127.0.0.1:8000/v1",
+    "model": "deepseek-v4-flash-vision-exp",
+    "prompt_file": "/var/tmp/random_message_prompt_all.md",
+    "multiplier": 8,
+    "prompt_tokens": 60493,
+    "concurrencies": [
+      2
+    ],
+    "repeat": 1,
+    "max_tokens": 2048,
+    "min_tokens": 0,
+    "user_message": "Give me a brief overview of what's going on right now and what's coming up.",
+    "thinking": "server",
+    "temperature": 0.6,
+    "top_p": 0.95
+  },
+  "cases": [
+    {
+      "concurrency": 2,
+      "trial": 0,
+      "elapsed_s": 105.3392092920003,
+      "aggregate_tok_s": 13.72708234397021,
+      "median_decode_tok_s": 24.979987585045546,
+      "median_ttft_s": 64.74429783299956,
+      "n_ok": 2,
+      "n_fail": 0,
+      "requests": [
+        {
+          "ok": true,
+          "error": null,
+          "ttft_s": 42.90260605399999,
+          "first_content_s": 102.68569047700021,
+          "elapsed_s": 105.33595712200076,
+          "completion_tokens": 876,
+          "prompt_tokens": 60610,
+          "reasoning_tokens": null,
+          "decode_tok_s": 14.030962378519193,
+          "reasoning_chars": 2828,
+          "content_chars": 110
+        },
+        {
+          "ok": true,
+          "error": null,
+          "ttft_s": 86.58598961199914,
+          "first_content_s": null,
+          "elapsed_s": 102.45060585699957,
+          "completion_tokens": 570,
+          "prompt_tokens": 60610,
+          "reasoning_tokens": null,
+          "decode_tok_s": 35.9290127915719,
+          "reasoning_chars": 1835,
+          "content_chars": 0
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "2": {
+      "concurrency": 2,
+      "n_ok": 2,
+      "n_fail": 0,
+      "median_decode_tok_s": 24.979987585045546,
+      "decode_min": 14.030962378519193,
+      "decode_max": 35.9290127915719,
+      "median_aggregate_tok_s": 13.72708234397021,
+      "median_ttft_s": 64.74429783299956,
+      "median_prompt_tokens": 60610.0,
+      "median_completion_tokens": 723.0,
+      "reasoning_token_share": null
+    }
+  }
+}

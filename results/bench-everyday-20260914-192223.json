@@ -1,0 +1,79 @@
+{
+  "timestamp": "2026-09-14T17:20:38.611552+00:00",
+  "config": {
+    "base_url": "http://127.0.0.1:8000/v1",
+    "model": "deepseek-v4-flash-vision-exp",
+    "prompt_file": "/var/tmp/random_message_prompt_all.md",
+    "multiplier": 8,
+    "prompt_tokens": 60493,
+    "concurrencies": [
+      2
+    ],
+    "repeat": 1,
+    "max_tokens": 2048,
+    "min_tokens": 0,
+    "user_message": "Give me a brief overview of what's going on right now and what's coming up.",
+    "thinking": "server",
+    "temperature": 0.6,
+    "top_p": 0.95,
+    "cached": false
+  },
+  "cases": [
+    {
+      "concurrency": 2,
+      "trial": 0,
+      "elapsed_s": 104.92329595400042,
+      "aggregate_tok_s": 13.781496157287538,
+      "median_decode_tok_s": 25.373536408552102,
+      "median_ttft_s": 64.43252294750027,
+      "n_ok": 2,
+      "n_fail": 0,
+      "requests": [
+        {
+          "ok": true,
+          "error": null,
+          "ttft_s": 42.64099887500015,
+          "first_content_s": 102.05058634299985,
+          "elapsed_s": 104.91999101500005,
+          "completion_tokens": 888,
+          "prompt_tokens": 60610,
+          "reasoning_tokens": null,
+          "cached_tokens": 4096,
+          "decode_tok_s": 14.258419564719716,
+          "reasoning_chars": 2754,
+          "content_chars": 123
+        },
+        {
+          "ok": true,
+          "error": null,
+          "ttft_s": 86.2240470200004,
+          "first_content_s": null,
+          "elapsed_s": 101.5164722060008,
+          "completion_tokens": 558,
+          "prompt_tokens": 60610,
+          "reasoning_tokens": null,
+          "cached_tokens": 4096,
+          "decode_tok_s": 36.48865325238449,
+          "reasoning_chars": 1667,
+          "content_chars": 0
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "2": {
+      "concurrency": 2,
+      "n_ok": 2,
+      "n_fail": 0,
+      "median_decode_tok_s": 25.373536408552102,
+      "decode_min": 14.258419564719716,
+      "decode_max": 36.48865325238449,
+      "median_aggregate_tok_s": 13.781496157287538,
+      "median_ttft_s": 64.43252294750027,
+      "median_prompt_tokens": 60610.0,
+      "median_cached_tokens": 4096.0,
+      "median_completion_tokens": 723.0,
+      "reasoning_token_share": null
+    }
+  }
+}
